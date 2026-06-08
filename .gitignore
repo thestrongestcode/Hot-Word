@@ -1,3 +1,7 @@
 rooms/
 *.tmp
 __pycache__/
+.DS_Store
+rooms/
+*.lock
+*.tmp
