@@ -1,0 +1,1294 @@
+import streamlit as st
+from streamlit_autorefresh import st_autorefresh
+import json
+import os
+import re
+import contextlib
+import time
+import random
+import string
+import math
+import unicodedata
+import html
+
+# ─── Constants ────────────────────────────────────────────────────────────────
+
+WORDS_FILE         = "words_alpha.txt"
+SPANISH_WORDS_FILE = "words_spanish.txt"
+ROOMS_DIR          = "rooms"
+STARTING_TIMER     = 30
+MIN_TURN_FLOOR     = 5
+TIMER_SHRINK       = 2
+MIN_STARTING_TIMER = 8
+LIVES              = 3
+ROOM_EXPIRY        = 300
+
+# Room code validation (Doc 3 §1)
+ROOM_CODE_RE = re.compile(r"^(P-)?[A-Z]{4}$")
+
+def is_valid_room_code(code):
+    return bool(ROOM_CODE_RE.fullmatch(str(code).strip().upper()))
+
+# ─── English combos ───────────────────────────────────────────────────────────
+
+EASY_COMBOS = [
+    "TH","CH","SH","TR","PR","BR","CR","ST","SP","SK",
+    "LY","FT","ER","NT","ND","ES","EN","OU","GH","WH",
+    "IN","AN","ON","TI","AT","TE","AL","RA","AR","RE",
+    "LE","IC","IS","RI","NE","OR","LI","RO","IT","LA",
+    "CA","CO","MA","IO","TO","TA","DE","SS","ME","NG",
+    "US","IA","LO","EL","NI","HE","OL","SE","IL","NA",
+    "ET","LL","SI","PE","AC","DI","AS","MI","ED","VE",
+    "HA","OM","HO","CE","EA","UR","NO","GE","UN","HI",
+    "AM","OS","MO","PH","AB","UL","OT","PA","EC","NC",
+]
+
+MEDIUM_COMBOS = [
+    "ING","NCE","STR","GHT","OUN","PLE","ENT","OUS","ATE","EAR",
+    "OWN","AIN","EAD","OOK","ALL","ORT","OOD","EEL","ION","ARD",
+    "ESS","TER","ATI","TIO","NES","IST","INE","TIC","ICA","ANT",
+    "CAL","TOR","ALI","PER","MEN","CON","VER","ITY","BLE","MAN",
+    "TRA","STI","ISM","IAN","LIT","RAT","AND","HER","LIN","TRI",
+    "GRA","ERI","ABL","STE","RAN","TIN","THE","ENE","ATO","ARI",
+    "DER","NTI","IVE","ERA","RES","NTE","LAT","STA","OLO","LOG",
+    "ONI","EST","ILL","PRO","AST","RIN","ONA","INT","MIN","ILI",
+]
+
+HARD_COMBOS = [
+    "SCR","THR","NCH","TCH","QUA","DGE","SQU","NGU","NGL",
+    "MBL","CKL","RPH","NGS","STH","NDL","PSY","GNI","MPT", "LVE","XTR","PHR",
+    "SPL","STL","GGL","RCH","NST", "RST","NTH","SKI","NCL","NCT","RSH",
+    "TION","NESS","ATIO","ICAL","ABLE","OLOG","MENT","ATOR","LITY","INES",
+    "STIC","OVER","NTER","ENES","STER","RAPH","TIVE","GRAP","OGRA","NDER",
+    "ILIT","LESS","TING","IONA","INTE","THER","ALLY","ALIS","TICA","ONAL",
+    "ISTI","BILI","ANTI","LOGI","ENCE","IOUS","RATI","IGHT","ANCE","ETER",
+    "LIST","SION","TRIC","TATI","LING","RING","ROUS","ENTA","ICAT","MATI",
+    "STRA","TORY","ABIL","ATIC","CENT","UNDE","INAT","LECT","ERAT","RESS",
+    "LAND","IZAT","TRAN","RIAN","NIST","EMEN","TTER","RIST","ALIZ","ECTI",
+    "COMP","OMET","ULAT","NISM","EOUS","NATE","CULA","ETIC","PRES","OGEN",
+    "CONS","ATIV","PARA","FORM","LISM","RANS","ULAR","ONIC","LIZE","METE",
+    "ARCH","CONT","MINA","SHIP","HEAD","TABL","COMM","ACTI","DING","KING",
+    "SIVE","SCEN","STRI","OUND","ANIS","NALI","ELEC","ETTE","RIAL",
+]
+
+# ─── Bad words filter ─────────────────────────────────────────────────────────
+
+BAD_WORDS = {
+    # English
+    "fuck","shit","cunt","cock","dick","ass","bitch","bastard","damn","crap",
+    "piss","fag","slut","whore","nigger","nigga","retard","faggot","twat",
+    # Spanish — profanity
+    "joder","mierda","puta","puto","coño","cono","hostia","cabron","cabrón",
+    "polla","culo","gilipollas","capullo","follar","verga","pendejo","chinga",
+    "chingada","cagar","cagada","maricon","maricón","mamada","mamadas",
+    "chingadera","chingaderas","putada","putadas","putazo","putazos",
+    "hijoputa","hijoputas","me cago","ostia",
+    # Spanish — slurs / offensive
+    "pene","ano","prostituta","zorra","perra","subnormal","retrasado",
+    "imbecil","estupido","idiota","mongolo",
+}
+
+NORMALIZED_BAD_WORDS = None  # populated after normalize() is defined
+
+def is_bad_word(word):
+    return normalize(word) in NORMALIZED_BAD_WORDS
+
+# ─── Spanish combos ───────────────────────────────────────────────────────────
+
+SPANISH_EASY_COMBOS = [
+    "DE","ES","EN","EL","LA","LO","LE","LAS","LOS","UN",
+    "AR","ER","IR","OR","AL","AN","IN","ON","AS","OS",
+    "IA","IO","IE","EI","AI","AU","EU","UA","UE","UI",
+    "CA","CE","CI","CO","CU","GA","GE","GI","GO","GU",
+    "RA","RE","RI","RO","TA","TE","TI","TO","SA","SE",
+    "SI","SO","PA","PE","PI","PO","MA","ME","MI","MO",
+    "NA","NE","NI","NO","DA","DE","DI","DO","VA","VE",
+    "VI","VO","PR","TR","BR","CR","GR","PL","CL","BL",
+    "FL","FR","DR","CH","LL","QU","RR","NT","ST","ND",
+]
+
+SPANISH_MEDIUM_COMBOS = [
+    "CON","DES","ENT","EST","QUE","ACI","ION","ADO","ADA","IDO",
+    "IDA","ERA","ERO","OSA","OSO","ANT","PAR","PRO","PRE","TRA",
+    "TER","ARI","RIA","RIO","INA","INO","ELA","ELO","ALE","ARA",
+    "ORE","RES","COM","MEN","PER","STA","TAR","CAR","CER","CIR",
+    "DAD","BLE","BRE","BRA","CLA","CLO","CRE","CRI","DOR","DRA",
+    "DRO","GRA","GRO","MAR","MER","MOR","NTE","NTO","RON","SAR",
+    "SER","SIO","TAD","TOS","TOR","TUR","VAL","VAR","VEN","VER",
+    "VID","VIR","CAL","COL","COR","CUR","GEN","GER","GIN","NAL",
+    "LES","LAS","LOS","NES","DOS","DAS","MOS","MIS","SOL","SAL",
+]
+
+SPANISH_HARD_COMBOS = [
+    "CION","ACION","NCIA","ANTE","ENTE","MENT","MIEN","IENT","ADOR","ABLE",
+    "IBLE","ISTA","ISMO","ARIO","ARIA","ERIA","IDAD","EDAD","ADES","ALES",
+    "ADOS","ADAS","IDOS","IDAS","ORES","ORAS","EROS","ERAS","OSOS","OSAS",
+    "CONS","CONT","COMP","COND","CONF","CONV","CONC","CONO","CORA","CORD",
+    "DESA","DESC","DESP","DEST","DERE","DIST","DISP","DICI","DORA","DURA",
+    "PREN","PRES","PRET","PRED","PROC","PROD","PROP","PROF","PROM","PROV",
+    "PRIM","TRAN","TRAS","TRAC","TRES","TRIB","TRON","ESTA","ESTE","ESTI",
+    "ESTO","ESTR","ENTA","ENTO","ANTI","ANCI","ARIO","ARIA","INTE","INTR",
+    "INCI","INDI","INFO","INST","INSP","INFL","IMPR","EXTR","EXPE","EXPR",
+    "EXIS","SUBS","SOBR","SENT","SENC","SERV","SEGU","CIEN","CIAS","CIOS",
+    "CIAL","CION","TICA","TICO","TURA","SION","RACI","LACI","DOCI","NACI",
+]
+
+# ─── Accent normalization ─────────────────────────────────────────────────────
+
+def normalize(text):
+    """Strip diacritics (accents, tildes on vowels, ü, etc). ñ → n."""
+    return ''.join(
+        c for c in unicodedata.normalize('NFD', text.lower())
+        if unicodedata.category(c) != 'Mn'
+    )
+
+# Build the normalized bad-word set now that normalize() is defined
+NORMALIZED_BAD_WORDS = {normalize(w) for w in BAD_WORDS}
+
+# ─── HTML escaping helper ─────────────────────────────────────────────────────
+
+def esc(s):
+    """Escape user-controlled strings before inserting into HTML."""
+    return html.escape(str(s), quote=True)
+
+# ─── Word validation ──────────────────────────────────────────────────────────
+
+@st.cache_resource
+def load_words():
+    english = set()
+    spanish = set()
+
+    if not os.path.exists(WORDS_FILE):
+        st.error(f"Missing required word list: {WORDS_FILE}")
+        return english, spanish
+
+    with open(WORDS_FILE, encoding="utf-8") as f:
+        for w in f:
+            word = w.strip().lower()
+            if word:
+                english.add(word)
+
+    if os.path.exists(SPANISH_WORDS_FILE):
+        with open(SPANISH_WORDS_FILE, encoding="utf-8") as f:
+            for w in f:
+                word = w.strip().lower()
+                if word:
+                    spanish.add(word)
+                    spanish.add(normalize(word))
+
+    return english, spanish
+
+def is_valid_play(word, combo, used_words, language="en"):
+    w      = word.lower().strip()
+    w_norm = normalize(w)
+    combo_norm = normalize(combo.lower())
+
+    if not w:
+        return False, "Type a word first." if language == "en" else "Escribe una palabra primero."
+    if is_bad_word(w):
+        return False, ("That word is inappropriate. Please enter an appropriate response."
+                       if language == "en" else
+                       "Esa palabra es inapropiada. Por favor escribe una respuesta adecuada.")
+    if combo_norm not in w_norm:
+        return False, (f'"{word}" doesn\'t contain "{combo}".' if language == "en"
+                       else f'"{word}" no contiene "{combo}".')
+
+    english, spanish = load_words()
+
+    if language == "es":
+        valid_word = w in spanish or w_norm in spanish
+    else:
+        valid_word = w in english
+
+    if not valid_word:
+        return False, (f'"{word}" isn\'t a valid word.' if language == "en"
+                       else f'"{word}" no es una palabra válida.')
+
+    if w_norm in [normalize(u) for u in used_words]:
+        return False, (f'"{word}" was already used.' if language == "en"
+                       else f'"{word}" ya fue usada.')
+
+    return True, "ok"
+
+# ─── Combo selection ──────────────────────────────────────────────────────────
+
+def pick_combo(round_num, used_combos, language="en"):
+    if language == "es":
+        if round_num <= 5:
+            pool = SPANISH_EASY_COMBOS
+        elif round_num <= 12:
+            pool = SPANISH_EASY_COMBOS + SPANISH_MEDIUM_COMBOS
+        else:
+            pool = SPANISH_MEDIUM_COMBOS + SPANISH_HARD_COMBOS
+    else:
+        if round_num <= 5:
+            pool = EASY_COMBOS
+        elif round_num <= 12:
+            pool = EASY_COMBOS + MEDIUM_COMBOS
+        else:
+            pool = MEDIUM_COMBOS + HARD_COMBOS
+    available = [c for c in pool if c not in used_combos]
+    if not available:
+        available = pool
+    return random.choice(available)
+
+# ─── File lock (Doc 3 §2) ─────────────────────────────────────────────────────
+
+@contextlib.contextmanager
+def room_file_lock(code, timeout=3.0, poll_interval=0.05):
+    code = str(code).strip().upper()
+    if not is_valid_room_code(code):
+        raise ValueError("Invalid room code.")
+
+    os.makedirs(ROOMS_DIR, exist_ok=True)
+    lock_path = os.path.join(ROOMS_DIR, f"{code}.lock")
+    start = time.time()
+    fd = None
+
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode("utf-8"))
+            break
+        except FileExistsError:
+            if time.time() - start > timeout:
+                raise TimeoutError("Room is busy. Try again.")
+            time.sleep(poll_interval)
+
+    try:
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+        try:
+            os.remove(lock_path)
+        except FileNotFoundError:
+            pass
+
+def mutate_room(code, mutator):
+    with room_file_lock(code):
+        state = load_room(code)
+        if state is None:
+            return None
+        mutator(state)
+        save_room(code, state)
+        return state
+
+# ─── Room helpers ─────────────────────────────────────────────────────────────
+
+def room_path(code):
+    # Doc 3 §1: validate code to prevent path traversal
+    code = str(code).strip().upper()
+    if not is_valid_room_code(code):
+        raise ValueError("Invalid room code.")
+    os.makedirs(ROOMS_DIR, exist_ok=True)
+    return os.path.join(ROOMS_DIR, f"{code}.json")
+
+def load_room(code):
+    p = room_path(code)
+    if not os.path.exists(p):
+        return None
+    for _ in range(3):
+        try:
+            with open(p) as f:
+                content = f.read()
+            if not content.strip():
+                time.sleep(0.05)
+                continue
+            return json.loads(content)
+        except (json.JSONDecodeError, OSError):
+            time.sleep(0.05)
+    return None
+
+def save_room(code, state):
+    p = room_path(code)
+    tmp = p + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, p)
+    except OSError:
+        with open(p, "w") as f:
+            json.dump(state, f)
+
+def create_room(code, name, private):
+    state = {
+        "players": [{"name": name, "lives": LIVES, "alive": True}],
+        "host": name, "is_private": private,
+        "started": False, "finished": False, "winner": None,
+        "current_player_idx": 0, "current_combo": "",
+        "used_combos": [], "used_words": [], "round": 1,
+        "timer_start": None, "timer_duration": STARTING_TIMER,
+        "last_message": "", "created_at": time.time(),
+        "language": "en",
+    }
+    save_room(code, state)
+    return state
+
+def join_room(code, name):
+    state = load_room(code)
+    if state is None:         return None, "Room not found."
+    if state["started"]:      return None, "Game already started."
+    existing_names = [p["name"].strip().casefold() for p in state["players"]]
+    if name.strip().casefold() in existing_names:
+                              return None, "Name already taken."
+    if len(state["players"]) >= 8:
+                              return None, "Room is full (max 8)."
+    state["players"].append({"name": name, "lives": LIVES, "alive": True})
+    save_room(code, state)
+    return state, "ok"
+
+def gen_code(private=False):
+    return ("P-" if private else "") + "".join(random.choices(string.ascii_uppercase, k=4))
+
+def gen_unique_code(private=False):
+    for _ in range(20):
+        code = gen_code(private)
+        if not os.path.exists(room_path(code)):
+            return code
+    raise RuntimeError("Could not generate a unique room code after 20 attempts.")
+
+def leave_room(code, name):
+    state = load_room(code)
+    if state is None: return
+    if state["host"] == name:
+        p = room_path(code)
+        if os.path.exists(p): os.remove(p)
+    else:
+        state["players"] = [p for p in state["players"] if p["name"] != name]
+        save_room(code, state)
+
+def kick_player(code, host_name, target_name):
+    state = load_room(code)
+    if state is None: return False, "Room not found."
+    if state["host"] != host_name: return False, "Only the host can kick."
+    if state.get("started"): return False, "Can't kick after game starts."
+    if target_name == host_name: return False, "Can't kick yourself."
+    state["players"] = [p for p in state["players"] if p["name"] != target_name]
+    save_room(code, state)
+    return True, "ok"
+
+def set_room_language(code, language):
+    state = load_room(code)
+    if state is None: return False
+    state["language"] = language
+    save_room(code, state)
+    return True
+
+def cleanup_rooms():
+    if not os.path.exists(ROOMS_DIR): return
+    now = time.time()
+    for fname in os.listdir(ROOMS_DIR):
+        if not fname.endswith(".json"): continue
+        p = os.path.join(ROOMS_DIR, fname)
+        try:
+            with open(p) as f:
+                s = json.load(f)
+            if s.get("finished"): os.remove(p); continue
+            if not s.get("started") and now - s.get("created_at", now) > ROOM_EXPIRY:
+                os.remove(p); continue
+            if s.get("started") and s.get("timer_start") and now - s["timer_start"] > 600:
+                os.remove(p)
+        except Exception:
+            pass
+
+def list_public_rooms():
+    cleanup_rooms()
+    if not os.path.exists(ROOMS_DIR): return []
+    rooms = []
+    for fname in os.listdir(ROOMS_DIR):
+        if not fname.endswith(".json"): continue
+        code = fname[:-5]
+        try:
+            s = load_room(code)
+            if s is None: continue
+            if not s.get("is_private") and not s.get("started") and not s.get("finished"):
+                rooms.append({"code": code, "host": s["host"],
+                               "players": len(s["players"]), "created_at": s.get("created_at", 0)})
+        except Exception:
+            continue
+    return sorted(rooms, key=lambda r: r["created_at"], reverse=True)
+
+# ─── Game logic ───────────────────────────────────────────────────────────────
+
+def alive_players(state):
+    return [p for p in state["players"] if p["alive"]]
+
+def start_game(code, state):
+    lang = state.get("language", "en")
+    combo = pick_combo(1, [], lang)
+    state.update(
+        started=True,
+        current_combo=combo,
+        used_combos=[combo],
+        timer_start=time.time(),
+        current_player_idx=0,
+        round=2,
+    )
+    save_room(code, state)
+
+# Doc 3 §4: unsaved advance helper
+def advance_turn_state(state, remaining_time):
+    alive = alive_players(state)
+    if len(alive) <= 1:
+        return
+
+    cur_name = state["players"][state["current_player_idx"]]["name"]
+    alive_names = [p["name"] for p in alive]
+    cur_idx = alive_names.index(cur_name) if cur_name in alive_names else 0
+    next_name = alive_names[(cur_idx + 1) % len(alive_names)]
+
+    for i, p in enumerate(state["players"]):
+        if p["name"] == next_name:
+            state["current_player_idx"] = i
+            break
+
+    guaranteed = max(remaining_time, MIN_TURN_FLOOR)
+    state["timer_start"] = time.time() - (state["timer_duration"] - guaranteed)
+
+    lang = state.get("language", "en")
+    combo = pick_combo(state["round"], state["used_combos"], lang)
+    state["current_combo"] = combo
+    state["used_combos"].append(combo)
+    state["round"] += 1
+
+# Doc 3 §3: unsaved timer mutation helper
+def check_timer_state(state):
+    if not state["started"] or state["finished"]:
+        return state
+
+    elapsed = time.time() - state["timer_start"]
+    if elapsed < state["timer_duration"]:
+        return state
+
+    lang  = state.get("language", "en")
+    is_es = lang == "es"
+
+    cp = state["players"][state["current_player_idx"]]
+    cp["lives"] -= 1
+
+    if cp["lives"] <= 0:
+        cp["alive"] = False
+        if is_es:
+            state["last_message"] = f'eliminated:{esc(cp["name"])} fue eliminado.'
+        else:
+            state["last_message"] = f'eliminated:{esc(cp["name"])} was eliminated.'
+    else:
+        if is_es:
+            lives_word = "vida" if cp["lives"] == 1 else "vidas"
+            state["last_message"] = f'timeout:{esc(cp["name"])} se quedó sin tiempo — {cp["lives"]} {lives_word} restantes.'
+        else:
+            lives_word_en = "life" if cp["lives"] == 1 else "lives"
+            state["last_message"] = f'timeout:{esc(cp["name"])} ran out of time — {cp["lives"]} {lives_word_en} left.'
+
+    state["timer_duration"] = max(MIN_STARTING_TIMER, state["timer_duration"] - TIMER_SHRINK)
+
+    alive = alive_players(state)
+
+    if len(alive) == 1:
+        state["finished"] = True
+        state["winner"] = alive[0]["name"]
+    elif len(alive) == 0:
+        state["finished"] = True
+        state["winner"] = "Nadie" if is_es else "Nobody"
+    else:
+        n_all = len(state["players"])
+        cur_global_idx = state["current_player_idx"]
+
+        for offset in range(1, n_all + 1):
+            candidate_idx = (cur_global_idx + offset) % n_all
+            if state["players"][candidate_idx]["alive"]:
+                state["current_player_idx"] = candidate_idx
+                break
+
+        combo = pick_combo(state["round"], state["used_combos"], lang)
+        state["current_combo"] = combo
+        state["used_combos"].append(combo)
+        state["round"] += 1
+
+    state["timer_start"] = time.time()
+    return state
+
+# Doc 3 §3: locked check_timer
+def check_timer(code, state=None):
+    try:
+        with room_file_lock(code):
+            fresh_state = load_room(code)
+            if fresh_state is None:
+                return state
+            check_timer_state(fresh_state)
+            save_room(code, fresh_state)
+            return fresh_state
+    except TimeoutError:
+        return state if state is not None else load_room(code)
+
+# Doc 3 §4: locked submit_word
+def submit_word(code, state, name, word):
+    try:
+        with room_file_lock(code):
+            fresh_state = load_room(code)
+            if fresh_state is None:
+                return state, "Room not found."
+
+            if fresh_state.get("finished"):
+                return fresh_state, "Game already finished."
+
+            cp = fresh_state["players"][fresh_state["current_player_idx"]]
+            if cp["name"] != name:
+                return fresh_state, ("No es tu turno." if fresh_state.get("language") == "es"
+                                     else "Not your turn.")
+
+            lang = fresh_state.get("language", "en")
+            valid, msg = is_valid_play(word, fresh_state["current_combo"],
+                                       fresh_state["used_words"], lang)
+            if not valid:
+                return fresh_state, msg
+
+            elapsed   = time.time() - fresh_state["timer_start"]
+            remaining = max(0, fresh_state["timer_duration"] - elapsed)
+
+            fresh_state["used_words"].append(normalize(word.lower()))
+
+            if lang == "es":
+                fresh_state["last_message"] = f'good:{esc(name)} jugó "{esc(word)}"'
+            else:
+                fresh_state["last_message"] = f'good:{esc(name)} played "{esc(word)}"'
+
+            advance_turn_state(fresh_state, remaining)
+            save_room(code, fresh_state)
+            return fresh_state, "ok"
+
+    except TimeoutError:
+        return state, "Room is busy. Try again."
+
+# ─── CSS ─────────────────────────────────────────────────────────────────────
+
+def inject_css():
+    st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500&display=swap');
+
+:root {
+    --ink:    #0f0f0f;
+    --paper:  #faf9f6;
+    --amber:  #e8a020;
+    --amber2: #fbbf24;
+    --muted:  #888;
+    --border: #e0ddd6;
+    --card:   #ffffff;
+    --danger: #c0392b;
+    --success:#1a7a3f;
+}
+
+.stApp, [data-testid="stAppViewContainer"] {
+    background: var(--paper) !important;
+    font-family: 'DM Sans', sans-serif;
+    color: var(--ink);
+}
+[data-testid="stHeader"], footer, header, #MainMenu { visibility: hidden; }
+
+h1, h2, h3 { font-family: 'DM Serif Display', serif !important; color: var(--ink); }
+
+.stTextInput input {
+    background: var(--card) !important;
+    color: var(--ink) !important;
+    border: 1.5px solid var(--border) !important;
+    border-radius: 6px !important;
+    font-family: 'DM Sans', sans-serif !important;
+    font-size: 1rem !important;
+    padding: 0.55rem 0.9rem !important;
+    transition: border-color 0.15s !important;
+}
+.stTextInput input:focus {
+    border-color: var(--ink) !important;
+    box-shadow: none !important;
+}
+
+.stButton button, [data-testid="stFormSubmitButton"] button {
+    background: var(--ink) !important;
+    color: var(--paper) !important;
+    border: none !important;
+    border-radius: 6px !important;
+    font-family: 'DM Sans', sans-serif !important;
+    font-weight: 500 !important;
+    font-size: 0.95rem !important;
+    padding: 0.55rem 1.4rem !important;
+    letter-spacing: 0.02em !important;
+    transition: opacity 0.15s !important;
+}
+.stButton button:hover, [data-testid="stFormSubmitButton"] button:hover {
+    opacity: 0.82 !important;
+}
+
+.btn-ghost .stButton button {
+    background: transparent !important;
+    color: var(--ink) !important;
+    border: 1.5px solid var(--border) !important;
+}
+.btn-ghost .stButton button:hover {
+    border-color: var(--ink) !important;
+    opacity: 1 !important;
+}
+
+.stTabs [data-baseweb="tab-list"] {
+    background: transparent;
+    border-bottom: 1.5px solid var(--border);
+    padding: 0;
+    gap: 0;
+}
+.stTabs [data-baseweb="tab"] {
+    color: var(--muted);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 0.9rem;
+    padding: 0.5rem 1.2rem;
+    border-radius: 0;
+    background: transparent;
+}
+.stTabs [aria-selected="true"] {
+    color: var(--ink) !important;
+    background: transparent !important;
+    border-bottom: 2px solid var(--ink) !important;
+    font-weight: 500 !important;
+}
+
+.stAlert { border-radius: 6px !important; font-family: 'DM Sans', sans-serif !important; }
+.stCheckbox label { font-family: 'DM Sans', sans-serif !important; color: var(--ink) !important; }
+hr { border-color: var(--border) !important; }
+
+.wb-title {
+    font-family: 'DM Serif Display', serif;
+    font-size: 3rem;
+    color: var(--ink);
+    letter-spacing: -0.02em;
+    line-height: 1;
+    margin-bottom: 0.2rem;
+}
+.wb-subtitle {
+    font-family: 'DM Sans', sans-serif;
+    color: var(--muted);
+    font-size: 0.95rem;
+    margin-bottom: 2rem;
+}
+.wb-section-label {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 0.5rem;
+}
+.wb-room-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 0.4rem;
+    background: var(--card);
+}
+.wb-room-code {
+    font-family: 'DM Mono', monospace;
+    font-size: 1rem;
+    font-weight: 500;
+    color: var(--ink);
+    letter-spacing: 0.1em;
+}
+.wb-room-meta { font-size: 0.82rem; color: var(--muted); }
+.wb-player-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.6rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 0.35rem;
+    background: var(--card);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 0.95rem;
+}
+.wb-lobby-code {
+    font-family: 'DM Mono', monospace;
+    font-size: 2rem;
+    font-weight: 500;
+    letter-spacing: 0.25em;
+    color: var(--ink);
+    background: var(--card);
+    border: 1.5px solid var(--border);
+    border-radius: 8px;
+    padding: 0.5rem 1.5rem;
+    display: inline-block;
+    margin: 0.5rem 0;
+}
+.wb-msg {
+    text-align: center;
+    padding: 0.55rem 1rem;
+    border-radius: 6px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 0.9rem;
+    font-weight: 500;
+    margin: 0.5rem 0 1rem;
+    letter-spacing: 0.01em;
+}
+.wb-msg-good { background: #edf7f1; color: var(--success); border: 1px solid #b8dfc8; }
+.wb-msg-bad  { background: #fdf0ee; color: var(--danger);  border: 1px solid #f0c4be; }
+.wb-turn-label {
+    text-align: center;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.8rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--amber);
+    font-weight: 500;
+    margin-bottom: 0.5rem;
+}
+.wb-waiting-label {
+    text-align: center;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 0.9rem;
+    color: var(--muted);
+    padding: 1rem 0;
+}
+
+[data-testid="stVerticalBlock"] > [data-testid="stVerticalBlock"] > div:has(button[kind="secondary"]) {
+    margin-top: -0.4rem;
+    margin-bottom: 0.35rem;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+# ─── Circle renderer ──────────────────────────────────────────────────────────
+
+def render_circle(state, my_name):
+    players  = state["players"]
+    n        = len(players)
+    cur_idx  = state["current_player_idx"]
+
+    elapsed   = time.time() - state["timer_start"] if state["timer_start"] else 0
+    remaining = max(0, state["timer_duration"] - elapsed)
+    secs      = int(remaining)
+    pct       = remaining / state["timer_duration"] if state["timer_duration"] else 1
+
+    if pct > 0.5:    tcol = "#1a7a3f"
+    elif pct > 0.25: tcol = "#e8a020"
+    else:            tcol = "#c0392b"
+
+    # Scroll fix: reduced canvas height and orbit radius
+    CX, CY       = 300, 260
+    R            = 155
+    CW, CH       = 600, 500
+    CRD_W, CRD_H = 76, 90
+
+    positions = []
+    for i in range(n):
+        angle = (2 * math.pi * i / n) - math.pi / 2
+        px = CX + R * math.cos(angle)
+        py = CY + R * math.sin(angle)
+        positions.append((px, py))
+
+    apx, apy = positions[cur_idx]
+    dx = apx - CX
+    dy = apy - CY
+    dist = math.hypot(dx, dy) or 1
+    bomb_r = 62
+    card_r = 50
+    ax1 = CX + (dx / dist) * bomb_r
+    ay1 = CY + (dy / dist) * bomb_r
+    ax2 = CX + (dx / dist) * (dist - card_r)
+    ay2 = CY + (dy / dist) * (dist - card_r)
+
+    combo = state.get("current_combo", "??")
+
+    cards_svg = ""
+    for i, p in enumerate(players):
+        px, py = positions[i]
+        cx0 = px - CRD_W / 2
+        cy0 = py - CRD_H / 2
+
+        is_active = (i == cur_idx)
+        is_me     = p["name"] == my_name
+        is_dead   = not p["alive"]
+        lives     = p["lives"]
+
+        # Doc 3 §7: truncate before escaping
+        raw_name_disp = p["name"] + (" ·you" if is_me else "")
+        if len(raw_name_disp) > 9:
+            raw_name_disp = raw_name_disp[:8] + "…"
+        name_disp = esc(raw_name_disp)
+
+        pips = ""
+        for j in range(LIVES):
+            pip_x = cx0 + 12 + j * 20
+            pip_y = cy0 + CRD_H - 22
+            if j < lives:
+                fill = "#c0392b" if not is_dead else "#ccc"
+            else:
+                fill = "none"
+            stroke = "#c0392b" if not is_dead else "#ccc"
+            hx, hy = pip_x, pip_y
+            pips += f'<path d="M{hx},{hy+3} C{hx},{hy} {hx-6},{hy} {hx-6},{hy-3} C{hx-6},{hy-8} {hx},{hy-8} {hx},{hy-4} C{hx},{hy-8} {hx+6},{hy-8} {hx+6},{hy-3} C{hx+6},{hy} {hx},{hy} {hx},{hy+3}Z" fill="{fill}" stroke="{stroke}" stroke-width="1.2"/>'
+
+        if is_dead:
+            card_fill   = "#f5f5f5"
+            card_stroke = "#ddd"
+            name_fill   = "#bbb"
+            card_opacity = "0.45"
+        elif is_active:
+            card_fill   = "#fffbf0"
+            card_stroke = "#e8a020"
+            name_fill   = "#0f0f0f"
+            card_opacity = "1"
+        else:
+            card_fill   = "#ffffff"
+            card_stroke = "#e0ddd6"
+            name_fill   = "#0f0f0f"
+            card_opacity = "1"
+
+        ring = ""
+        if is_active:
+            ring = f'<rect x="{cx0-4}" y="{cy0-4}" width="{CRD_W+8}" height="{CRD_H+8}" rx="12" fill="none" stroke="#e8a020" stroke-width="1.5" stroke-dasharray="4 3"/>'
+
+        badge = ""
+        if is_active:
+            pill_w = max(52, len(combo) * 13 + 24)
+            pill_x = px - pill_w / 2
+            pill_y = cy0 - 42
+            badge  = f'<rect x="{pill_x}" y="{pill_y}" width="{pill_w}" height="26" rx="5" fill="#e8a020"/>'
+            badge += f'<text x="{px}" y="{pill_y+18}" text-anchor="middle" font-family="DM Mono, monospace" font-size="15" font-weight="500" fill="#3a1f00" letter-spacing="3">{combo}</text>'
+            if is_me:
+                badge += f'<text x="{px}" y="{cy0-48}" text-anchor="middle" font-family="DM Mono, monospace" font-size="9" fill="#e8a020" letter-spacing="1">YOUR TURN</text>'
+
+        div_y = cy0 + 34
+
+        elim = ""
+        if is_dead:
+            elim = f'<line x1="{cx0+8}" y1="{cy0+8}" x2="{cx0+CRD_W-8}" y2="{cy0+CRD_H-8}" stroke="#ccc" stroke-width="1"/><line x1="{cx0+CRD_W-8}" y1="{cy0+8}" x2="{cx0+8}" y2="{cy0+CRD_H-8}" stroke="#ccc" stroke-width="1"/>'
+
+        cards_svg += f"""
+        <g opacity="{card_opacity}">
+            {ring}
+            {badge}
+            <rect x="{cx0}" y="{cy0}" width="{CRD_W}" height="{CRD_H}" rx="8"
+                  fill="{card_fill}" stroke="{card_stroke}" stroke-width="1.5"/>
+            <text x="{px}" y="{cy0+22}" text-anchor="middle"
+                  font-family="DM Sans, sans-serif" font-size="12" font-weight="500"
+                  fill="{name_fill}">{name_disp}</text>
+            <line x1="{cx0+10}" y1="{div_y}" x2="{cx0+CRD_W-10}" y2="{div_y}"
+                  stroke="{card_stroke}" stroke-width="0.8"/>
+            {pips}
+            {elim}
+        </g>"""
+
+    bomb_svg = f"""
+    <g>
+        <circle cx="{CX}" cy="{CY}" r="54" fill="#111"/>
+        <circle cx="{CX-14}" cy="{CY-14}" r="9" fill="#222"/>
+        <rect x="{CX-5}" y="{CY-66}" width="10" height="16" rx="5" fill="#7a5a10"/>
+        <path d="M{CX} {CY-66} Q{CX+20} {CY-84} {CX+14} {CY-98} Q{CX+8} {CY-112} {CX+24} {CY-120}"
+              fill="none" stroke="#7a5a10" stroke-width="3" stroke-linecap="round"/>
+        <circle cx="{CX+24}" cy="{CY-121}" r="5" fill="#e8a020"/>
+        <line x1="{CX+24}" y1="{CY-128}" x2="{CX+20}" y2="{CY-134}" stroke="#e8a020" stroke-width="2" stroke-linecap="round"/>
+        <line x1="{CX+30}" y1="{CY-126}" x2="{CX+35}" y2="{CY-131}" stroke="#e8a020" stroke-width="2" stroke-linecap="round"/>
+        <line x1="{CX+27}" y1="{CY-129}" x2="{CX+29}" y2="{CY-136}" stroke="#e8a020" stroke-width="2" stroke-linecap="round"/>
+        <rect x="{CX-34}" y="{CY-14}" width="68" height="26" rx="5" fill="#e8a020"/>
+        <text x="{CX}" y="{CY+6}" text-anchor="middle"
+              font-family="DM Mono, monospace" font-size="14" font-weight="500"
+              fill="#3a1f00" letter-spacing="3">{combo}</text>
+        <text x="{CX}" y="{CY+40}" text-anchor="middle"
+              font-family="DM Mono, monospace" font-size="30" font-weight="500"
+              fill="{tcol}">{secs}s</text>
+    </g>"""
+
+    arrow_svg = f"""
+    <defs>
+      <marker id="arrowhead" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+        <path d="M0,0 L0,6 L7,3 z" fill="#e8a020"/>
+      </marker>
+    </defs>
+    <line x1="{ax1:.1f}" y1="{ay1:.1f}" x2="{ax2:.1f}" y2="{ay2:.1f}"
+          stroke="#e8a020" stroke-width="1.5" stroke-dasharray="5 4"
+          marker-end="url(#arrowhead)" opacity="0.9"/>"""
+
+    orbit_svg = f'<circle cx="{CX}" cy="{CY}" r="{R}" fill="none" stroke="#e0ddd6" stroke-width="0.8" stroke-dasharray="3 6"/>'
+
+    full_html = f"""
+    <div style="background:#faf9f6;padding:0;margin:0;">
+    <svg width="100%" viewBox="0 0 {CW} {CH}" xmlns="http://www.w3.org/2000/svg"
+         style="display:block;max-width:{CW}px;margin:0 auto;">
+        {arrow_svg}
+        {orbit_svg}
+        {bomb_svg}
+        {cards_svg}
+    </svg>
+    </div>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500&display=swap" rel="stylesheet">
+    """
+    # Scroll fix: height reduced from CH+10 (670) to CH (500)
+    st.components.v1.html(full_html, height=CH)
+
+
+# ─── App ──────────────────────────────────────────────────────────────────────
+
+st.set_page_config(page_title="Hot Word", page_icon="💣", layout="centered")
+inject_css()
+
+for key, default in [
+    ("screen", "home"), ("room_code", None),
+    ("player_name", None), ("form_key", 0), ("last_error", ""),
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+spanish_available = os.path.exists(SPANISH_WORDS_FILE)
+
+# Doc 3 §6: block startup if english word list is missing
+english_available = os.path.exists(WORDS_FILE)
+if not english_available:
+    st.error(f"Missing required word list: {WORDS_FILE}. The game cannot run without it.")
+    st.stop()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HOME
+# ══════════════════════════════════════════════════════════════════════════════
+if st.session_state.screen == "home":
+
+    st.markdown("<div class='wb-title'>Hot Word</div>", unsafe_allow_html=True)
+    st.markdown("<div class='wb-subtitle'>Type a word containing the combo before the bomb goes off.</div>", unsafe_allow_html=True)
+
+    if "home_name" not in st.session_state:
+        st.session_state.home_name = ""
+
+    st.markdown("<div class='wb-section-label'>Your name</div>", unsafe_allow_html=True)
+    st.text_input("Your name", max_chars=16, placeholder="Enter your name…",
+                  key="home_name", label_visibility="collapsed")
+    name = st.session_state.home_name
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    tab1, tab2, tab3 = st.tabs(["Public rooms", "Join private", "Create room"])
+
+    with tab1:
+        rooms = list_public_rooms()
+        if not rooms:
+            st.markdown("<p style='color:#888;font-size:0.9rem;padding:1rem 0;'>No open rooms right now.</p>",
+                        unsafe_allow_html=True)
+        for r in rooms:
+            col_info, col_btn = st.columns([5, 1])
+            with col_info:
+                st.markdown(f"""
+                <div class="wb-room-row">
+                    <div>
+                        <span class="wb-room-code">{esc(r['code'])}</span>
+                        <span class="wb-room-meta">&ensp;·&ensp;{esc(r['host'])}</span>
+                    </div>
+                    <span class="wb-room-meta">{r['players']}/8</span>
+                </div>""", unsafe_allow_html=True)
+            with col_btn:
+                if st.button("Join", key=f"j_{r['code']}"):
+                    if not name.strip():
+                        st.error("Enter your name first.")
+                    else:
+                        s, msg = join_room(r["code"], name.strip())
+                        if s:
+                            st.session_state.room_code = r["code"]
+                            st.session_state.player_name = name.strip()
+                            st.session_state.screen = "lobby"
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+    with tab2:
+        st.markdown("<div class='wb-section-label'>Room code</div>", unsafe_allow_html=True)
+        with st.form("join_private_form"):
+            code_in = st.text_input("Room code", placeholder="e.g. P-ABCD",
+                                    label_visibility="collapsed")
+            submitted = st.form_submit_button("Join room")
+        if submitted:
+            n = st.session_state.home_name.strip()
+            c = code_in.upper().strip()
+            if not n:
+                st.error("Enter your name first.")
+            elif not c:
+                st.error("Enter a room code.")
+            elif not is_valid_room_code(c):
+                # Doc 3 §5: validate code format before attempting join
+                st.error("Invalid room code.")
+            else:
+                s, msg = join_room(c, n)
+                if s:
+                    st.session_state.room_code = c
+                    st.session_state.player_name = n
+                    st.session_state.screen = "lobby"
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+    with tab3:
+        with st.form("create_room_form"):
+            private = st.checkbox("Private room")
+            if st.form_submit_button("Create room"):
+                n = st.session_state.home_name.strip()
+                if not n:
+                    st.error("Enter your name first.")
+                else:
+                    code = gen_unique_code(private)
+                    create_room(code, n, private)
+                    st.session_state.room_code = code
+                    st.session_state.player_name = n
+                    st.session_state.screen = "lobby"
+                    st.rerun()
+
+    st_autorefresh(interval=3000, key="home_refresh", limit=None)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LOBBY
+# ══════════════════════════════════════════════════════════════════════════════
+elif st.session_state.screen == "lobby":
+    if not st.session_state.get("room_code"):
+        st.session_state.screen = "home"; st.rerun(); st.stop()
+    state = load_room(st.session_state.room_code)
+    if state is None:
+        st.session_state.screen = "home"; st.rerun(); st.stop()
+    if state.get("started"):
+        st.session_state.screen = "game"; st.rerun(); st.stop()
+
+    code = st.session_state.room_code
+
+    my_names = [p["name"] for p in state["players"]]
+    if st.session_state.player_name not in my_names:
+        st.warning("You were removed from the room.")
+        st.session_state.screen = "home"
+        st.session_state.room_code = None
+        st.rerun(); st.stop()
+
+    is_host = st.session_state.player_name == state["host"]
+    current_lang = state.get("language", "en")
+    is_es = current_lang == "es"
+
+    if is_es:
+        privacy_label = "Privada" if state["is_private"] else "Pública"
+        lobby_title = "Sala de espera"
+        share_hint = "Comparte este código con tus amigos"
+        players_label = "JUGADORES"
+    else:
+        privacy_label = "Private" if state["is_private"] else "Public"
+        lobby_title = "Lobby"
+        share_hint = "Share this code with friends"
+        players_label = "PLAYERS"
+
+    st.markdown(f"<div class='wb-title' style='font-size:2rem;'>{lobby_title}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='wb-section-label'>{privacy_label} room</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='wb-lobby-code'>{esc(code)}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='color:#888;font-size:0.82rem;margin-bottom:1.2rem;'>{share_hint}</div>",
+                unsafe_allow_html=True)
+
+    # Language selector (host only)
+    LANG_OPTIONS = ["en", "es"] if spanish_available else ["en"]
+    LANG_LABELS  = {
+        "en": ("🇺🇸", "English"),
+        "es": ("🇪🇸", "Español"),
+    }
+    LANG_HINTS = {
+        "en": "Combos and validation are in English.",
+        "es": "Los combos y la validación son en español.",
+    }
+
+    if is_host:
+        if not spanish_available and current_lang == "es":
+            set_room_language(code, "en")
+            current_lang = "en"
+
+        lang_idx = LANG_OPTIONS.index(current_lang) if current_lang in LANG_OPTIONS else 0
+        chosen = st.radio(
+            "Language",
+            options=LANG_OPTIONS,
+            index=lang_idx,
+            key="lang_radio",
+            format_func=lambda x: {
+                "en": "🇺🇸  English",
+                "es": "🇪🇸  Español",
+            }[x],
+            help="Choose which language combos players must match.",
+        )
+        if chosen != current_lang:
+            set_room_language(code, chosen)
+            st.rerun()
+        st.caption(LANG_HINTS.get(current_lang, ""))
+
+        if not spanish_available:
+            st.caption("⚠️ Spanish mode unavailable: words_spanish.txt is missing.")
+
+    else:
+        flag, label = LANG_LABELS.get(current_lang, ("", current_lang))
+        st.caption(f"{flag} {label}")
+
+    st.markdown(f"<div class='wb-section-label'>{players_label}</div>", unsafe_allow_html=True)
+    # Doc 3 §8: use enumerate index for kick button keys to avoid raw names in keys
+    for idx, p in enumerate(state["players"]):
+        crown = " 👑" if p["name"] == state["host"] else ""
+        you   = (" · tú" if is_es else " · you") if p["name"] == st.session_state.player_name else ""
+        can_kick = is_host and p["name"] != st.session_state.player_name
+        st.markdown(
+            f"<div class='wb-player-row'>"
+            f"<span>{esc(p['name'])}{crown}</span>"
+            f"<span style='color:#888;font-size:0.82rem;'>{you}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        if can_kick:
+            kick_label = "Expulsar" if is_es else "Remove"
+            if st.button(kick_label, key=f"kick_{idx}"):
+                kick_player(code, st.session_state.player_name, p["name"])
+                st.rerun()
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    col_leave, col_start = st.columns([1, 2])
+
+    with col_leave:
+        st.markdown("<div class='btn-ghost'>", unsafe_allow_html=True)
+        leave_label = "Salir" if current_lang == "es" else "Leave"
+        if st.button(leave_label):
+            leave_room(code, st.session_state.player_name)
+            st.session_state.screen = "home"
+            st.session_state.room_code = None
+            st.rerun(); st.stop()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with col_start:
+        if is_host:
+            if len(state["players"]) < 2:
+                need_msg = "Se necesitan al menos 2 jugadores." if current_lang == "es" else "Need at least 2 players."
+                st.markdown(f"<p style='color:#888;font-size:0.88rem;padding-top:0.5rem;'>{need_msg}</p>",
+                            unsafe_allow_html=True)
+            else:
+                start_label = "Iniciar partida →" if current_lang == "es" else "Start game →"
+                if st.button(start_label):
+                    state = load_room(code)
+                    start_game(code, state)
+                    st.session_state.screen = "game"
+                    st.rerun()
+        else:
+            waiting_msg = (f"Esperando a {esc(state['host'])} para iniciar…" if current_lang == "es"
+                           else f"Waiting for {esc(state['host'])} to start…")
+            st.markdown(f"<p style='color:#888;font-size:0.88rem;padding-top:0.5rem;'>{waiting_msg}</p>",
+                        unsafe_allow_html=True)
+
+    st_autorefresh(interval=2000, key="lobby_refresh")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GAME
+# ══════════════════════════════════════════════════════════════════════════════
+elif st.session_state.screen == "game":
+    if not st.session_state.get("room_code"):
+        st.session_state.screen = "home"; st.rerun(); st.stop()
+    state = load_room(st.session_state.room_code)
+    if state is None:
+        st.error("Room lost.")
+        st.session_state.screen = "home"; st.rerun()
+
+    state   = check_timer(st.session_state.room_code, state)
+    my_name = st.session_state.player_name
+    cp      = state["players"][state["current_player_idx"]]
+    is_my_turn = cp["name"] == my_name and not state["finished"]
+    lang    = state.get("language", "en")
+    is_es   = lang == "es"
+
+    if state["finished"]:
+        st.balloons()
+        winner_label = "gana." if is_es else "wins."
+        st.markdown(f"<div class='wb-title'>{esc(state['winner'])} {winner_label}</div>", unsafe_allow_html=True)
+        st.markdown("<hr>", unsafe_allow_html=True)
+        for p in state["players"]:
+            icon = "—" if p["name"] == state["winner"] else ("eliminado" if is_es else "out")
+            st.markdown(
+                f"<div class='wb-player-row'><span>{esc(p['name'])}</span>"
+                f"<span style='color:#888;font-size:0.82rem;'>{icon}</span></div>",
+                unsafe_allow_html=True
+            )
+        st.markdown("<br>", unsafe_allow_html=True)
+        btn_label = "Volver al inicio" if is_es else "Back to home"
+        if st.button(btn_label):
+            st.session_state.screen = "home"
+            st.session_state.room_code = None
+            st.rerun()
+        st.stop()
+
+    render_circle(state, my_name)
+
+    render_circle(state, my_name)
+
+with st.expander("📜 Historial de palabras usadas"):
+    if state["used_words"]:
+        for word in reversed(state["used_words"]):
+            st.write(f"• {word}")
+    else:
+        st.caption("Todavía no se han jugado palabras.")
+
+msg = state.get("last_message", "")
+
+    msg = state.get("last_message", "")
+    if msg:
+        if msg.startswith("good:"):
+            text = msg[5:]
+            st.markdown(f"<div class='wb-msg wb-msg-good'>{text}</div>", unsafe_allow_html=True)
+        elif msg.startswith("eliminated:") or msg.startswith("timeout:"):
+            text = msg.split(":", 1)[1]
+            st.markdown(f"<div class='wb-msg wb-msg-bad'>{text}</div>", unsafe_allow_html=True)
+
+    if is_my_turn:
+        combo = state["current_combo"]
+        turn_label = "Tu turno &mdash; escribe una palabra que contenga" if is_es else "Your turn &mdash; type a word containing"
+        st.markdown(
+            f"<div class='wb-turn-label'>{turn_label} "
+            f"<span style='font-size:1.1rem;letter-spacing:0.12em;color:#e8a020;'>{combo}</span></div>",
+            unsafe_allow_html=True,
+        )
+
+        if st.session_state.last_error:
+            st.markdown(f"<div class='wb-msg wb-msg-bad'>{esc(st.session_state.last_error)}</div>",
+                        unsafe_allow_html=True)
+
+        placeholder = f"{combo} · escribe tu palabra aquí…" if is_es else f"{combo} · type your word here…"
+        submit_label = "Enviar →" if is_es else "Submit →"
+        with st.form(key=f"wf_{st.session_state.form_key}", clear_on_submit=True):
+            word = st.text_input(
+                "word", label_visibility="collapsed",
+                placeholder=placeholder,
+            )
+            submitted = st.form_submit_button(submit_label)
+
+        if submitted and word.strip():
+            state, result = submit_word(st.session_state.room_code, state, my_name, word.strip())
+            if result == "ok":
+                st.session_state.form_key += 1
+                st.session_state.last_error = ""
+            else:
+                st.session_state.last_error = result
+            st.rerun()
+    else:
+        waiting_label = (f"Esperando a <strong>{esc(cp['name'])}</strong>…" if is_es
+                         else f"Waiting for <strong>{esc(cp['name'])}</strong>…")
+        st.markdown(
+            f"<div class='wb-waiting-label'>{waiting_label}</div>",
+            unsafe_allow_html=True
+        )
+        st.session_state.last_error = ""
+
+    st.components.v1.html("""
+    <script>
+    setTimeout(() => {
+        const inputs = window.parent.document.querySelectorAll('input[type="text"]');
+        if (inputs.length > 0) inputs[inputs.length - 1].focus();
+    }, 200);
+
+    window.parent.document.addEventListener('keydown', function(e) {
+        const active = window.parent.document.activeElement;
+        const isTyping = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA');
+        if (!isTyping && e.key === 'c') {
+            e.stopPropagation();
+        }
+    }, true);
+    </script>
+    """, height=0)
+
+    st_autorefresh(interval=1000, key="game_refresh")
