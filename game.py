@@ -321,10 +321,72 @@ def create_room(code, name, private):
         "timer_start": None, "timer_duration": STARTING_TIMER,
         "last_message": "", "created_at": time.time(),
         "language": "en",
+        "rematch_votes": [],
+        "rematch_countdown": None,
+        "rematch_code": None,
     }
     save_room(code, state)
     return state
+REMATCH_TIMEOUT = 10
 
+def vote_rematch(code, player_name):
+    with room_file_lock(code):
+        state = load_room(code)
+        if state is None or not state["finished"]:
+            return state
+        if player_name not in state["rematch_votes"]:
+            state["rematch_votes"].append(player_name)
+        if state["rematch_countdown"] is None:
+            state["rematch_countdown"] = time.time()
+        alive = alive_players(state)
+        all_voted = all(p["name"] in state["rematch_votes"] for p in alive)
+        if all_voted:
+            new_code = gen_unique_code(state["is_private"])
+            create_room(new_code, state["host"], state["is_private"])
+            new_state = load_room(new_code)
+            for p in alive:
+                if p["name"] != state["host"]:
+                    new_state["players"].append({
+                        "name": p["name"], "lives": LIVES, "alive": True
+                    })
+            new_state["language"] = state.get("language", "en")
+            save_room(new_code, new_state)
+            state["rematch_code"] = new_code
+        save_room(code, state)
+        return state
+
+def check_rematch_timeout(code):
+    state = load_room(code)
+    if state is None or not state["finished"]:
+        return state
+    if state["rematch_countdown"] is None:
+        return state
+    if state.get("rematch_code"):
+        return state
+    elapsed = time.time() - state["rematch_countdown"]
+    if elapsed < REMATCH_TIMEOUT:
+        return state
+    voters = state["rematch_votes"]
+    if not voters:
+        return state
+    with room_file_lock(code):
+        state = load_room(code)
+        if state.get("rematch_code"):
+            return state
+        new_code = gen_unique_code(state["is_private"])
+        host = voters[0]
+        create_room(new_code, host, state["is_private"])
+        new_state = load_room(new_code)
+        for p in state["players"]:
+            if p["name"] in voters and p["name"] != host:
+                new_state["players"].append({
+                    "name": p["name"], "lives": LIVES, "alive": True
+                })
+        new_state["language"] = state.get("language", "en")
+        save_room(new_code, new_state)
+        state["rematch_code"] = new_code
+        save_room(code, state)
+        return state
 def join_room(code, name):
     state = load_room(code)
     if state is None:         return None, "Room not found."
@@ -1194,24 +1256,84 @@ elif st.session_state.screen == "game":
     is_es   = lang == "es"
 
     if state["finished"]:
-        st.balloons()
-        winner_label = "gana." if is_es else "wins."
-        st.markdown(f"<div class='wb-title'>{esc(state['winner'])} {winner_label}</div>", unsafe_allow_html=True)
-        st.markdown("<hr>", unsafe_allow_html=True)
-        for p in state["players"]:
-            icon = "—" if p["name"] == state["winner"] else ("eliminado" if is_es else "out")
-            st.markdown(
-                f"<div class='wb-player-row'><span>{esc(p['name'])}</span>"
-                f"<span style='color:#888;font-size:0.82rem;'>{icon}</span></div>",
-                unsafe_allow_html=True
-            )
-        st.markdown("<br>", unsafe_allow_html=True)
-        btn_label = "Volver al inicio" if is_es else "Back to home"
-        if st.button(btn_label):
-            st.session_state.screen = "home"
-            st.session_state.room_code = None
+    st.balloons()
+    is_es = state.get("language", "en") == "es"
+    winner_label = "gana." if is_es else "wins."
+    st.markdown(f"<div class='wb-title'>{esc(state['winner'])} {winner_label}</div>",
+                unsafe_allow_html=True)
+    st.markdown("<hr>", unsafe_allow_html=True)
+    for p in state["players"]:
+        icon = "🏆" if p["name"] == state["winner"] else ("eliminado" if is_es else "out")
+        st.markdown(
+            f"<div class='wb-player-row'><span>{esc(p['name'])}</span>"
+            f"<span style='color:#888;font-size:0.82rem;'>{icon}</span></div>",
+            unsafe_allow_html=True
+        )
+    st.markdown("<hr>", unsafe_allow_html=True)
+
+    state = check_rematch_timeout(st.session_state.room_code)
+
+    if state.get("rematch_code"):
+        new_code = state["rematch_code"]
+        new_state = load_room(new_code)
+        if new_state and my_name in [p["name"] for p in new_state["players"]]:
+            st.success("✓ Rematch starting!" if not is_es else "✓ ¡Revancha iniciando!")
+            st.session_state.room_code = new_code
+            st.session_state.screen = "lobby"
+            time.sleep(1)
             st.rerun()
-        st.stop()
+        else:
+            st.info("Rematch started without you." if not is_es else "La revancha empezó sin ti.")
+            if st.button("🏠 Home" if not is_es else "🏠 Inicio"):
+                st.session_state.screen = "home"
+                st.session_state.room_code = None
+                st.rerun()
+    else:
+        votes = state.get("rematch_votes", [])
+        countdown_start = state.get("rematch_countdown")
+        alive = alive_players(state)
+        already_voted = my_name in votes
+
+        if countdown_start:
+            remaining = max(0, REMATCH_TIMEOUT - (time.time() - countdown_start))
+            secs_left = int(remaining)
+            st.markdown(f"""
+                <div style='text-align:center;padding:1rem 0 0.5rem;'>
+                    <span style='font-family:DM Mono,monospace;font-size:2.5rem;
+                                 color:{"#c0392b" if secs_left <= 3 else "#e8a020"};'>
+                        {secs_left}s
+                    </span>
+                    <div style='color:#888;font-size:0.85rem;margin-top:0.3rem;'>
+                        {"tiempo para votar" if is_es else "left to vote"}
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
+
+        vote_count = f"{len(votes)}/{len(alive)}"
+        st.markdown(f"<div style='text-align:center;color:#888;font-size:0.85rem;'>"
+                    f"{'Votos' if is_es else 'Votes'}: {vote_count}</div>",
+                    unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            play_label = "🔁 Revancha" if is_es else "🔁 Play again"
+            if not already_voted:
+                if st.button(play_label, use_container_width=True):
+                    vote_rematch(st.session_state.room_code, my_name)
+                    st.rerun()
+            else:
+                st.markdown(f"<div style='text-align:center;color:#1a7a3f;font-size:0.9rem;"
+                            f"padding-top:0.6rem;'>{'✓ Votaste' if is_es else '✓ Voted'}</div>",
+                            unsafe_allow_html=True)
+        with col2:
+            home_label = "🏠 Salir" if is_es else "🏠 New room"
+            if st.button(home_label, use_container_width=True):
+                st.session_state.screen = "home"
+                st.session_state.room_code = None
+                st.rerun()
+
+    st.stop()
 
     render_circle(state, my_name)
 
