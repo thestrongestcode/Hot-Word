@@ -1164,19 +1164,16 @@ def render_how_to_play(spanish_available, french_available):
                     st.session_state.how_lang = lang_code
                     st.rerun()
                 st.markdown("</div>", unsafe_allow_html=True)
-                # Inject scoped CSS: ghost style baseline, stronger border when active
+                # Ghost style always; active = thicker darker border only
                 active_css = (
-                    f"#\\{wrap_id} button {{"
-                    f" border: 2.5px solid #0f0f0f !important;"
-                    f" background: #ffffff !important;"
-                    f" color: #0f0f0f !important; }}"
+                    f"#{wrap_id} button {{ border: 2px solid #0f0f0f !important; }}"
                 ) if is_active else ""
                 st.markdown(f"""
 <style>
 #{wrap_id} button {{
     background: #ffffff !important;
     color: #0f0f0f !important;
-    border: 1.5px solid #e0ddd6 !important;
+    border: 1.5px solid #ccc !important;
     font-family: 'DM Mono', monospace !important;
     font-size: 0.8rem !important;
     font-weight: 500 !important;
@@ -1193,7 +1190,7 @@ def render_how_to_play(spanish_available, french_available):
             else:
                 st.markdown(
                     f"<div style=\"padding:0.45rem 0.5rem;border-radius:6px;"
-                    f"border:1.5px solid #e0ddd6;background:#fff;"
+                    f"border:1.5px solid #ccc;background:#fff;"
                     f"font-family:'DM Mono',monospace;font-size:0.8rem;"
                     f"font-weight:500;letter-spacing:0.06em;color:#bbb;"
                     f"text-align:center;cursor:not-allowed;\">"
