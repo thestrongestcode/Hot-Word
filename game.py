@@ -1333,7 +1333,7 @@ elif st.session_state.screen == "game":
                 st.session_state.room_code = None
                 st.rerun()
 
-    st.stop()
+        st.stop()
 
     render_circle(state, my_name)
 
