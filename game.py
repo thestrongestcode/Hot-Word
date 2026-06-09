@@ -1153,65 +1153,53 @@ def render_how_to_play(spanish_available, french_available):
     col_langs, col_content = st.columns([1, 5])
 
     with col_langs:
-        # Render visual buttons as pure HTML (outside Streamlit CSS scope).
-        # They click hidden real Streamlit buttons via JS by matching aria-label.
+        # Strategy: render the styled div first, then the real Streamlit button
+        # on top of it using negative margin. The real button is opacity:0 but
+        # fully clickable — it sits exactly over the visual div.
         for lang_code, short, available in lang_options:
             is_active = current == lang_code
             if available:
                 border = "2px solid #0f0f0f" if is_active else "1.5px solid #ccc"
                 fw     = "600" if is_active else "500"
-                st.components.v1.html(f"""
-<style>
-  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@500;600&display=swap');
-  * {{ margin:0; padding:0; box-sizing:border-box; }}
-  body {{ background:transparent; }}
-  button {{
-    width:100%; padding:8px 10px; border-radius:6px;
-    border:{border}; background:#fff;
-    font-family:'DM Mono',monospace; font-size:13px;
-    font-weight:{fw}; letter-spacing:0.06em; color:#0f0f0f;
-    cursor:pointer; transition:border-color 0.12s;
-  }}
-  button:hover {{ border-color:#555; }}
-</style>
-<button onclick="
-  var all = window.parent.document.querySelectorAll('button[kind=secondary], button[data-testid=stBaseButton-secondary]');
-  for(var i=0;i<all.length;i++){{
-    if(all[i].innerText.trim()==='{short}'){{ all[i].click(); break; }}
-  }}
-">{short}</button>
-""", height=42, scrolling=False)
-            else:
-                st.components.v1.html(f"""
-<style>
-  * {{ margin:0; padding:0; box-sizing:border-box; }}
-  body {{ background:transparent; }}
-  div {{
-    width:100%; padding:8px 10px; border-radius:6px;
-    border:1.5px solid #ddd; background:#fff;
-    font-family:'DM Mono',monospace; font-size:13px;
-    font-weight:500; letter-spacing:0.06em; color:#bbb;
-    text-align:center; cursor:not-allowed;
-  }}
-</style>
-<div>{short}</div>
-""", height=42, scrolling=False)
-
-        # Real Streamlit buttons — hidden visually, clicked by the iframes above
-        st.markdown("""<style>
-[data-testid="stVerticalBlock"] iframe + div button[kind="secondary"],
-[data-testid="stVerticalBlock"] iframe + div [data-testid="stBaseButton-secondary"] {
-    position:absolute !important; opacity:0 !important;
-    pointer-events:none !important; height:1px !important;
-    width:1px !important; overflow:hidden !important;
-    padding:0 !important; margin:0 !important;
-}
-</style>""", unsafe_allow_html=True)
-        for lang_code, short, available in lang_options:
-            if available:
-                if st.button(short, key=f"how_lang_btn_{lang_code}"):
+                # Visual layer
+                st.markdown(
+                    f"<div style='padding:8px 10px;border-radius:6px;"
+                    f"border:{border};background:#fff;"
+                    f"font-family:DM Mono,monospace;font-size:13px;"
+                    f"font-weight:{fw};letter-spacing:0.06em;color:#0f0f0f;"
+                    f"text-align:center;margin-bottom:-38px;'>  {short}</div>",
+                    unsafe_allow_html=True
+                )
+                # Real button floated on top — transparent so visual div shows through
+                st.markdown("<div class='htp-btn-wrap'>", unsafe_allow_html=True)
+                if st.button(short, key=f"how_lang_btn_{lang_code}", use_container_width=True):
                     st.session_state.how_lang = lang_code
                     st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    f"<div style='padding:8px 10px;border-radius:6px;"
+                    f"border:1.5px solid #ddd;background:#fff;"
+                    f"font-family:DM Mono,monospace;font-size:13px;"
+                    f"font-weight:500;letter-spacing:0.06em;color:#bbb;"
+                    f"text-align:center;margin-bottom:6px;'>  {short}</div>",
+                    unsafe_allow_html=True
+                )
+
+        # Make the real buttons transparent — they sit on top for clicks only
+        st.markdown("""<style>
+.htp-btn-wrap button {
+    opacity: 0 !important;
+    margin-top: 0 !important;
+    margin-bottom: 6px !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+.htp-btn-wrap button:hover {
+    opacity: 0 !important;
+}
+</style>""", unsafe_allow_html=True)
     with col_content:
         hl = current
         if hl == "es" and not spanish_available:
