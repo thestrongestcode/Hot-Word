@@ -1269,6 +1269,14 @@ elif st.session_state.screen == "game":
         const inputs = window.parent.document.querySelectorAll('input[type="text"]');
         if (inputs.length > 0) inputs[inputs.length - 1].focus();
     }, 200);
+
+    window.parent.document.addEventListener('keydown', function(e) {
+        const active = window.parent.document.activeElement;
+        const isTyping = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA');
+        if (!isTyping && e.key === 'c') {
+            e.stopPropagation();
+        }
+    }, true);
     </script>
     """, height=0)
 
