@@ -1143,79 +1143,102 @@ def render_how_to_play(spanish_available, french_available):
     if "how_lang" not in st.session_state:
         st.session_state.how_lang = "en"
 
+    lang_options = [
+        ("en", "En", True),
+        ("es", "Es", spanish_available),
+        ("fr", "Fr", french_available),
+    ]
+    current = st.session_state.how_lang
+
     col_langs, col_content = st.columns([1, 5])
 
     with col_langs:
-        lang_options = [
-            ("en", "🇺🇸", "En", True),
-            ("es", "🇪🇸", "Es", spanish_available),
-            ("fr", "🇫🇷", "Fr", french_available),
-        ]
-        for lang_code, flag, short, available in lang_options:
-            is_active = st.session_state.how_lang == lang_code
-            active_cls = "active" if is_active else ""
-            disabled_cls = "" if available else "disabled"
-            label = f"{flag} {short}"
+        for lang_code, short, available in lang_options:
+            is_active = current == lang_code
             if available:
-                if st.button(label, key=f"how_lang_btn_{lang_code}",
+                # Wrap button in a div we can target with CSS for active state
+                wrap_id = f"wrap_how_{lang_code}"
+                st.markdown(f"<div id='{wrap_id}'>", unsafe_allow_html=True)
+                if st.button(short, key=f"how_lang_btn_{lang_code}",
                              use_container_width=True):
                     st.session_state.how_lang = lang_code
                     st.rerun()
-                # Manually style via markdown hack — inject active state visually
-                if is_active:
-                    st.markdown(
-                        f"<style>div[data-testid='stButton']:has(button[kind='secondary']) "
-                        f"button {{ }}</style>",
-                        unsafe_allow_html=True
-                    )
+                st.markdown("</div>", unsafe_allow_html=True)
+                # Inject scoped CSS: ghost style baseline, stronger border when active
+                active_css = (
+                    f"#\\{wrap_id} button {{"
+                    f" border: 2.5px solid #0f0f0f !important;"
+                    f" background: #ffffff !important;"
+                    f" color: #0f0f0f !important; }}"
+                ) if is_active else ""
+                st.markdown(f"""
+<style>
+#{wrap_id} button {{
+    background: #ffffff !important;
+    color: #0f0f0f !important;
+    border: 1.5px solid #e0ddd6 !important;
+    font-family: 'DM Mono', monospace !important;
+    font-size: 0.8rem !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.06em !important;
+    padding: 0.45rem 0.5rem !important;
+    transition: border-color 0.12s !important;
+}}
+#{wrap_id} button:hover {{
+    border-color: #888 !important;
+    opacity: 1 !important;
+}}
+{active_css}
+</style>""", unsafe_allow_html=True)
             else:
-                # Disabled — render as grayed-out non-interactive
                 st.markdown(
-                    f"<div class='wb-lang-btn disabled' title='Word list not available'>"
-                    f"{label}</div>",
+                    f"<div style=\"padding:0.45rem 0.5rem;border-radius:6px;"
+                    f"border:1.5px solid #e0ddd6;background:#fff;"
+                    f"font-family:'DM Mono',monospace;font-size:0.8rem;"
+                    f"font-weight:500;letter-spacing:0.06em;color:#bbb;"
+                    f"text-align:center;cursor:not-allowed;\">"
+                    f"{short}</div>",
                     unsafe_allow_html=True
                 )
 
     with col_content:
-        hl = st.session_state.how_lang
-        # Fallback if chosen lang became unavailable
+        hl = current
         if hl == "es" and not spanish_available:
             hl = "en"
         if hl == "fr" and not french_available:
             hl = "en"
 
-        content = HOW_TO_PLAY[hl]
+        c = HOW_TO_PLAY[hl]
 
-        # If unavailable lang was previously selected, show note
-        orig = st.session_state.how_lang
-        if (orig == "es" and not spanish_available) or (orig == "fr" and not french_available):
-            lang_name = "Spanish" if orig == "es" else "French"
+        if (current == "es" and not spanish_available) or (current == "fr" and not french_available):
+            lang_name = "Spanish" if current == "es" else "French"
             st.markdown(
                 f"<div class='wb-msg wb-msg-bad' style='margin-bottom:1rem;'>"
                 f"⚠️ {lang_name} word list not available — showing English.</div>",
                 unsafe_allow_html=True
             )
 
-        st.markdown(f"""
-<div class="wb-how-card">
-  <div class="wb-section-label">{content['basics_title']}</div>
-  <p>{content['basics_text']}</p>
-
-  <hr class="wb-how-divider">
-
-  <div class="wb-section-label">{content['round_title']}</div>
-  {''.join(f"""
-  <div class="wb-how-rule">
+        rules_html = "".join(
+            f'''<div class="wb-how-rule">
     <span class="wb-how-rule-num">{num}</span>
     <span class="wb-how-rule-text">{text}</span>
-  </div>""" for num, text in content['rules'])}
+  </div>'''
+            for num, text in c["rules"]
+        )
 
+        st.markdown(f"""
+<div class="wb-how-card">
+  <div class="wb-section-label">{c["basics_title"]}</div>
+  <p>{c["basics_text"]}</p>
   <hr class="wb-how-divider">
-
-  <div class="wb-section-label">{content['winning_title']}</div>
-  <p>{content['winning_text']}</p>
+  <div class="wb-section-label">{c["round_title"]}</div>
+  {rules_html}
+  <hr class="wb-how-divider">
+  <div class="wb-section-label">{c["winning_title"]}</div>
+  <p>{c["winning_text"]}</p>
 </div>
 """, unsafe_allow_html=True)
+
 
 
 # ─── Circle renderer ──────────────────────────────────────────────────────────
@@ -2112,31 +2135,6 @@ elif st.session_state.screen == "game":
         )
 
     render_circle(state, my_name)
-
-# ─────────────────────────────────────────────
-# HISTORIAL DE LAS ÚLTIMAS 30 PALABRAS
-# ─────────────────────────────────────────────
-
-historial = state.get("used_words", [])
-
-with st.expander(f"📜 Historial ({len(historial)} palabras)"):
-
-    if historial:
-
-        ultimas_30 = list(reversed(historial[-30:]))
-
-        st.text_area(
-            "Historial",
-            value="\n".join(ultimas_30),
-            height=300,
-            disabled=True,
-            label_visibility="collapsed",
-        )
-    else:
-        st.caption("Todavía no se han jugado palabras.")
-
-# ─────────────────────────────────────────────
-
 
     msg = state.get("last_message", "")
     if msg:
