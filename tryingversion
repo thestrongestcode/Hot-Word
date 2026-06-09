@@ -2161,7 +2161,6 @@ elif st.session_state.screen == "game":
         st.markdown(f"<div class='wb-msg wb-msg-bad'>{esc(st.session_state.last_error)}</div>",
                     unsafe_allow_html=True)
 
-    # ✅ MOSTRAR HISTORIAL DE ACIERTOS
     correct_words = []
     if "history" in state:
         correct_words = [
