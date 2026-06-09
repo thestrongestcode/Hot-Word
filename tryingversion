@@ -1213,9 +1213,7 @@ elif st.session_state.screen == "game":
             st.rerun()
         st.stop()
 
-    render_circle(state, my_name)
-
-    render_circle(state, my_name)
+render_circle(state, my_name)
 
 with st.expander("📜 Historial de palabras usadas"):
     if state["used_words"]:
