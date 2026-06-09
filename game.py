@@ -1148,81 +1148,70 @@ def render_how_to_play(spanish_available, french_available):
         ("es", "Es", spanish_available),
         ("fr", "Fr", french_available),
     ]
-
-    # Check if a lang button was clicked via query param
-    qp = st.query_params.get("hlang", None)
-    if qp in ("en", "es", "fr"):
-        avail_map = {"en": True, "es": spanish_available, "fr": french_available}
-        if avail_map.get(qp, False):
-            st.session_state.how_lang = qp
-        st.query_params.clear()
-        st.rerun()
-
     current = st.session_state.how_lang
 
     col_langs, col_content = st.columns([1, 5])
 
     with col_langs:
+        # Render visual buttons as pure HTML (outside Streamlit CSS scope).
+        # They click hidden real Streamlit buttons via JS by matching aria-label.
         for lang_code, short, available in lang_options:
             is_active = current == lang_code
             if available:
-                active_style = (
-                    "border:2px solid #0f0f0f;font-weight:600;"
-                ) if is_active else (
-                    "border:1.5px solid #ccc;font-weight:500;"
-                )
-                # Render a real <button> inside an iframe (st.components.v1.html)
-                # so it is completely outside Streamlit's CSS scope
+                border = "2px solid #0f0f0f" if is_active else "1.5px solid #ccc"
+                fw     = "600" if is_active else "500"
                 st.components.v1.html(f"""
 <style>
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@500;600&display=swap');
-  * {{ margin:0;padding:0;box-sizing:border-box; }}
+  * {{ margin:0; padding:0; box-sizing:border-box; }}
   body {{ background:transparent; }}
   button {{
-    width:100%;
-    padding:8px 10px;
-    border-radius:6px;
-    {active_style}
-    background:#fff;
-    font-family:'DM Mono',monospace;
-    font-size:13px;
-    letter-spacing:0.06em;
-    color:#0f0f0f;
-    cursor:pointer;
-    transition:border-color 0.12s;
+    width:100%; padding:8px 10px; border-radius:6px;
+    border:{border}; background:#fff;
+    font-family:'DM Mono',monospace; font-size:13px;
+    font-weight:{fw}; letter-spacing:0.06em; color:#0f0f0f;
+    cursor:pointer; transition:border-color 0.12s;
   }}
   button:hover {{ border-color:#555; }}
 </style>
-<button onclick="window.parent.location.search='?hlang={lang_code}'">{short}</button>
-<script>
-  window.addEventListener('message', function(e) {{
-    if (e.data && e.data.type === 'hlang_ack' && e.data.code === '{lang_code}') {{
-      // acknowledged
-    }}
-  }});
-</script>
+<button onclick="
+  var all = window.parent.document.querySelectorAll('button[kind=secondary], button[data-testid=stBaseButton-secondary]');
+  for(var i=0;i<all.length;i++){{
+    if(all[i].innerText.trim()==='{short}'){{ all[i].click(); break; }}
+  }}
+">{short}</button>
 """, height=42, scrolling=False)
             else:
                 st.components.v1.html(f"""
 <style>
-  * {{ margin:0;padding:0;box-sizing:border-box; }}
+  * {{ margin:0; padding:0; box-sizing:border-box; }}
   body {{ background:transparent; }}
   div {{
-    width:100%;
-    padding:8px 10px;
-    border-radius:6px;
-    border:1.5px solid #ddd;
-    background:#fff;
-    font-family:'DM Mono',monospace;
-    font-size:13px;
-    letter-spacing:0.06em;
-    color:#bbb;
-    text-align:center;
-    cursor:not-allowed;
+    width:100%; padding:8px 10px; border-radius:6px;
+    border:1.5px solid #ddd; background:#fff;
+    font-family:'DM Mono',monospace; font-size:13px;
+    font-weight:500; letter-spacing:0.06em; color:#bbb;
+    text-align:center; cursor:not-allowed;
   }}
 </style>
 <div>{short}</div>
 """, height=42, scrolling=False)
+
+        # Real Streamlit buttons — hidden visually, clicked by the iframes above
+        st.markdown("""<style>
+[data-testid="stVerticalBlock"] iframe + div button[kind="secondary"],
+[data-testid="stVerticalBlock"] iframe + div [data-testid="stBaseButton-secondary"] {
+    position:absolute !important; opacity:0 !important;
+    pointer-events:none !important; height:1px !important;
+    width:1px !important; overflow:hidden !important;
+    padding:0 !important; margin:0 !important;
+}
+</style>""", unsafe_allow_html=True)
+        for lang_code, short, available in lang_options:
+            if available:
+                if st.button(short, key=f"how_lang_btn_{lang_code}"):
+                    st.session_state.how_lang = lang_code
+                    st.rerun()
     with col_content:
         hl = current
         if hl == "es" and not spanish_available:
