@@ -2113,6 +2113,31 @@ elif st.session_state.screen == "game":
 
     render_circle(state, my_name)
 
+# ─────────────────────────────────────────────
+# HISTORIAL DE LAS ÚLTIMAS 30 PALABRAS
+# ─────────────────────────────────────────────
+
+historial = state.get("used_words", [])
+
+with st.expander(f"📜 Historial ({len(historial)} palabras)"):
+
+    if historial:
+
+        ultimas_30 = list(reversed(historial[-30:]))
+
+        st.text_area(
+            "Historial",
+            value="\n".join(ultimas_30),
+            height=300,
+            disabled=True,
+            label_visibility="collapsed",
+        )
+    else:
+        st.caption("Todavía no se han jugado palabras.")
+
+# ─────────────────────────────────────────────
+
+
     msg = state.get("last_message", "")
     if msg:
         if msg.startswith("good:"):
