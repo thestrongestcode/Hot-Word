@@ -1215,78 +1215,127 @@ elif st.session_state.screen == "game":
 
 render_circle(state, my_name)
 
-with st.expander("📜 Historial de palabras usadas"):
-    if state["used_words"]:
-        for word in reversed(state["used_words"]):
-            st.write(f"• {word}")
+# ─── Historial de palabras ─────────────────────────────────
+
+historial = state.get("used_words", [])
+
+with st.expander(f"📜 Historial ({len(historial)} palabras)"):
+
+    if historial:
+
+        ultimas_30 = list(reversed(historial[-30:]))
+
+        texto = ""
+
+        for i, palabra in enumerate(ultimas_30, start=1):
+            texto += f"{i}. {palabra}\n"
+
+        st.text_area(
+            "Palabras utilizadas",
+            value=texto,
+            height=300,
+            disabled=True,
+            label_visibility="collapsed",
+        )
+
     else:
         st.caption("Todavía no se han jugado palabras.")
 
+st.write("DEBUG:", len(historial))
+
+# ─── Último mensaje ───────────────────────────────────────
+
 msg = state.get("last_message", "")
 
-    msg = state.get("last_message", "")
-    if msg:
-        if msg.startswith("good:"):
-            text = msg[5:]
-            st.markdown(f"<div class='wb-msg wb-msg-good'>{text}</div>", unsafe_allow_html=True)
-        elif msg.startswith("eliminated:") or msg.startswith("timeout:"):
-            text = msg.split(":", 1)[1]
-            st.markdown(f"<div class='wb-msg wb-msg-bad'>{text}</div>", unsafe_allow_html=True)
+if msg:
 
-    if is_my_turn:
-        combo = state["current_combo"]
-        turn_label = "Tu turno &mdash; escribe una palabra que contenga" if is_es else "Your turn &mdash; type a word containing"
+    if msg.startswith("good:"):
+        text = msg[5:]
         st.markdown(
-            f"<div class='wb-turn-label'>{turn_label} "
-            f"<span style='font-size:1.1rem;letter-spacing:0.12em;color:#e8a020;'>{combo}</span></div>",
+            f"<div class='wb-msg wb-msg-good'>{text}</div>",
             unsafe_allow_html=True,
         )
 
-        if st.session_state.last_error:
-            st.markdown(f"<div class='wb-msg wb-msg-bad'>{esc(st.session_state.last_error)}</div>",
-                        unsafe_allow_html=True)
-
-        placeholder = f"{combo} · escribe tu palabra aquí…" if is_es else f"{combo} · type your word here…"
-        submit_label = "Enviar →" if is_es else "Submit →"
-        with st.form(key=f"wf_{st.session_state.form_key}", clear_on_submit=True):
-            word = st.text_input(
-                "word", label_visibility="collapsed",
-                placeholder=placeholder,
-            )
-            submitted = st.form_submit_button(submit_label)
-
-        if submitted and word.strip():
-            state, result = submit_word(st.session_state.room_code, state, my_name, word.strip())
-            if result == "ok":
-                st.session_state.form_key += 1
-                st.session_state.last_error = ""
-            else:
-                st.session_state.last_error = result
-            st.rerun()
-    else:
-        waiting_label = (f"Esperando a <strong>{esc(cp['name'])}</strong>…" if is_es
-                         else f"Waiting for <strong>{esc(cp['name'])}</strong>…")
+    elif msg.startswith("eliminated:") or msg.startswith("timeout:"):
+        text = msg.split(":", 1)[1]
         st.markdown(
-            f"<div class='wb-waiting-label'>{waiting_label}</div>",
-            unsafe_allow_html=True
+            f"<div class='wb-msg wb-msg-bad'>{text}</div>",
+            unsafe_allow_html=True,
         )
-        st.session_state.last_error = ""
 
-    st.components.v1.html("""
-    <script>
-    setTimeout(() => {
-        const inputs = window.parent.document.querySelectorAll('input[type="text"]');
-        if (inputs.length > 0) inputs[inputs.length - 1].focus();
-    }, 200);
+# ─── Turno del jugador ────────────────────────────────────
 
-    window.parent.document.addEventListener('keydown', function(e) {
-        const active = window.parent.document.activeElement;
-        const isTyping = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA');
-        if (!isTyping && e.key === 'c') {
-            e.stopPropagation();
-        }
-    }, true);
-    </script>
-    """, height=0)
+if is_my_turn:
 
-    st_autorefresh(interval=1000, key="game_refresh")
+    combo = state["current_combo"]
+
+    turn_label = (
+        "Tu turno &mdash; escribe una palabra que contenga"
+        if is_es
+        else "Your turn &mdash; type a word containing"
+    )
+
+    st.markdown(
+        f"<div class='wb-turn-label'>{turn_label} "
+        f"<span style='font-size:1.1rem;letter-spacing:0.12em;color:#e8a020;'>{combo}</span></div>",
+        unsafe_allow_html=True,
+    )
+
+    if st.session_state.last_error:
+        st.markdown(
+            f"<div class='wb-msg wb-msg-bad'>{esc(st.session_state.last_error)}</div>",
+            unsafe_allow_html=True,
+        )
+
+    placeholder = (
+        f"{combo} · escribe tu palabra aquí…"
+        if is_es
+        else f"{combo} · type your word here…"
+    )
+
+    submit_label = "Enviar →" if is_es else "Submit →"
+
+    with st.form(
+        key=f"wf_{st.session_state.form_key}",
+        clear_on_submit=True
+    ):
+
+        word = st.text_input(
+            "word",
+            label_visibility="collapsed",
+            placeholder=placeholder,
+        )
+
+        submitted = st.form_submit_button(submit_label)
+
+    if submitted and word.strip():
+
+        state, result = submit_word(
+            st.session_state.room_code,
+            state,
+            my_name,
+            word.strip()
+        )
+
+        if result == "ok":
+            st.session_state.form_key += 1
+            st.session_state.last_error = ""
+        else:
+            st.session_state.last_error = result
+
+        st.rerun()
+
+else:
+
+    waiting_label = (
+        f"Esperando a <strong>{esc(cp['name'])}</strong>…"
+        if is_es
+        else f"Waiting for <strong>{esc(cp['name'])}</strong>…"
+    )
+
+    st.markdown(
+        f"<div class='wb-waiting-label'>{waiting_label}</div>",
+        unsafe_allow_html=True
+    )
+
+    st.session_state.last_error = ""
