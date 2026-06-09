@@ -1256,22 +1256,22 @@ elif st.session_state.screen == "game":
     is_es   = lang == "es"
 
     if state["finished"]:
-    st.balloons()
-    is_es = state.get("language", "en") == "es"
-    winner_label = "gana." if is_es else "wins."
-    st.markdown(f"<div class='wb-title'>{esc(state['winner'])} {winner_label}</div>",
-                unsafe_allow_html=True)
-    st.markdown("<hr>", unsafe_allow_html=True)
-    for p in state["players"]:
-        icon = "🏆" if p["name"] == state["winner"] else ("eliminado" if is_es else "out")
-        st.markdown(
-            f"<div class='wb-player-row'><span>{esc(p['name'])}</span>"
-            f"<span style='color:#888;font-size:0.82rem;'>{icon}</span></div>",
-            unsafe_allow_html=True
-        )
-    st.markdown("<hr>", unsafe_allow_html=True)
-
-    state = check_rematch_timeout(st.session_state.room_code)
+        st.balloons()
+        is_es = state.get("language", "en") == "es"
+        winner_label = "gana." if is_es else "wins."
+        st.markdown(f"<div class='wb-title'>{esc(state['winner'])} {winner_label}</div>",
+                    unsafe_allow_html=True)
+        st.markdown("<hr>", unsafe_allow_html=True)
+        for p in state["players"]:
+            icon = "🏆" if p["name"] == state["winner"] else ("eliminado" if is_es else "out")
+            st.markdown(
+                f"<div class='wb-player-row'><span>{esc(p['name'])}</span>"
+                f"<span style='color:#888;font-size:0.82rem;'>{icon}</span></div>",
+                unsafe_allow_html=True
+            )
+        st.markdown("<hr>", unsafe_allow_html=True)
+    
+        state = check_rematch_timeout(st.session_state.room_code)
 
     if state.get("rematch_code"):
         new_code = state["rematch_code"]
