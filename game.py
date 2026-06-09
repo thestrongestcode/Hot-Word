@@ -525,7 +525,6 @@ def check_rematch_or_expire(code):
                 return state
 
             if time_up and not enough_voted:
-                # For same-device: also allow single-player rematch vote
                 if state.get("same_device") and len(votes) >= 1:
                     _reset_for_rematch(state)
                     save_room(code, state)
@@ -985,41 +984,6 @@ hr { border-color: var(--border) !important; }
 .wb-how-heart { color: #c0392b; font-size: 0.9rem; }
 .wb-how-divider { border: none; border-top: 1px solid var(--border); margin: 1.1rem 0; }
 
-/* How to play lang selector */
-.wb-lang-btn-wrap {
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-    padding-top: 0.15rem;
-}
-.wb-lang-btn {
-    display: block;
-    width: 100%;
-    padding: 0.45rem 0.5rem;
-    border-radius: 6px;
-    border: 1.5px solid var(--border);
-    background: var(--card);
-    font-family: 'DM Mono', monospace;
-    font-size: 0.78rem;
-    font-weight: 500;
-    letter-spacing: 0.05em;
-    color: var(--ink);
-    cursor: pointer;
-    text-align: center;
-    transition: all 0.12s;
-}
-.wb-lang-btn:hover { border-color: var(--ink); }
-.wb-lang-btn.active {
-    background: var(--ink) !important;
-    color: var(--paper) !important;
-    border-color: var(--ink) !important;
-}
-.wb-lang-btn.disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-    pointer-events: none;
-}
-
 /* Same-device badge */
 .wb-same-device-badge {
     display: inline-flex;
@@ -1139,6 +1103,8 @@ HOW_TO_PLAY = {
     },
 }
 
+# ─── How to Play renderer (fixed — no double-render trick) ───────────────────
+
 def render_how_to_play(spanish_available, french_available):
     if "how_lang" not in st.session_state:
         st.session_state.how_lang = "en"
@@ -1153,53 +1119,75 @@ def render_how_to_play(spanish_available, french_available):
     col_langs, col_content = st.columns([1, 5])
 
     with col_langs:
-        # Strategy: render the styled div first, then the real Streamlit button
-        # on top of it using negative margin. The real button is opacity:0 but
-        # fully clickable — it sits exactly over the visual div.
         for lang_code, short, available in lang_options:
             is_active = current == lang_code
+
             if available:
-                border = "2px solid #0f0f0f" if is_active else "1.5px solid #ccc"
-                fw     = "600" if is_active else "500"
-                # Visual layer
-                st.markdown(
-                    f"<div style='padding:8px 10px;border-radius:6px;"
-                    f"border:{border};background:#fff;"
-                    f"font-family:DM Mono,monospace;font-size:13px;"
-                    f"font-weight:{fw};letter-spacing:0.06em;color:#0f0f0f;"
-                    f"text-align:center;margin-bottom:-38px;'>  {short}</div>",
-                    unsafe_allow_html=True
-                )
-                # Real button floated on top — transparent so visual div shows through
-                st.markdown("<div class='htp-btn-wrap'>", unsafe_allow_html=True)
+                if is_active:
+                    bg     = "#0f0f0f"
+                    color  = "#faf9f6"
+                    border = "2px solid #0f0f0f"
+                    fw     = "600"
+                    hover  = "#333333"
+                else:
+                    bg     = "#ffffff"
+                    color  = "#0f0f0f"
+                    border = "1.5px solid #d0cdc6"
+                    fw     = "500"
+                    hover  = "#f3f1ec"
+
+                # Inject style targeting this specific button by its key.
+                # Streamlit sets data-testid on the container; we use the
+                # key attribute on the button element itself.
+                st.markdown(f"""
+                <style>
+                [data-testid="stButton"]:has(button[kind="secondary"][aria-label="{short}"]) button,
+                button[data-testid="baseButton-secondary"][aria-label="{short}"] {{
+                    background:     {bg}     !important;
+                    color:          {color}  !important;
+                    border:         {border} !important;
+                    font-family:    'DM Mono', monospace !important;
+                    font-size:      13px     !important;
+                    font-weight:    {fw}     !important;
+                    letter-spacing: 0.06em   !important;
+                    padding:        8px 10px !important;
+                    border-radius:  6px      !important;
+                    width:          100%     !important;
+                    margin-bottom:  6px      !important;
+                    box-shadow:     none     !important;
+                    transition:     all 0.12s !important;
+                }}
+                [data-testid="stButton"]:has(button[kind="secondary"][aria-label="{short}"]) button:hover {{
+                    background: {hover} !important;
+                    opacity: 1 !important;
+                }}
+                </style>
+                """, unsafe_allow_html=True)
+
                 if st.button(short, key=f"how_lang_btn_{lang_code}", use_container_width=True):
                     st.session_state.how_lang = lang_code
                     st.rerun()
-                st.markdown("</div>", unsafe_allow_html=True)
+
             else:
+                # Static non-clickable pill for unavailable languages
                 st.markdown(
-                    f"<div style='padding:8px 10px;border-radius:6px;"
-                    f"border:1.5px solid #ddd;background:#fff;"
-                    f"font-family:DM Mono,monospace;font-size:13px;"
-                    f"font-weight:500;letter-spacing:0.06em;color:#bbb;"
-                    f"text-align:center;margin-bottom:6px;'>  {short}</div>",
+                    f"<div style='"
+                    f"padding:8px 10px;"
+                    f"border-radius:6px;"
+                    f"border:1.5px solid #e0ddd6;"
+                    f"background:#fff;"
+                    f"font-family:DM Mono,monospace;"
+                    f"font-size:13px;"
+                    f"font-weight:500;"
+                    f"letter-spacing:0.06em;"
+                    f"color:#ccc;"
+                    f"text-align:center;"
+                    f"margin-bottom:6px;"
+                    f"cursor:not-allowed;"
+                    f"'>{short}</div>",
                     unsafe_allow_html=True
                 )
 
-        # Make the real buttons transparent — they sit on top for clicks only
-        st.markdown("""<style>
-.htp-btn-wrap button {
-    opacity: 0 !important;
-    margin-top: 0 !important;
-    margin-bottom: 6px !important;
-    background: transparent !important;
-    border: none !important;
-    box-shadow: none !important;
-}
-.htp-btn-wrap button:hover {
-    opacity: 0 !important;
-}
-</style>""", unsafe_allow_html=True)
     with col_content:
         hl = current
         if hl == "es" and not spanish_available:
@@ -1219,9 +1207,9 @@ def render_how_to_play(spanish_available, french_available):
 
         rules_html = "".join(
             f'''<div class="wb-how-rule">
-    <span class="wb-how-rule-num">{num}</span>
-    <span class="wb-how-rule-text">{text}</span>
-  </div>'''
+  <span class="wb-how-rule-num">{num}</span>
+  <span class="wb-how-rule-text">{text}</span>
+</div>'''
             for num, text in c["rules"]
         )
 
@@ -1237,7 +1225,6 @@ def render_how_to_play(spanish_available, french_available):
   <p>{c["winning_text"]}</p>
 </div>
 """, unsafe_allow_html=True)
-
 
 
 # ─── Circle renderer ──────────────────────────────────────────────────────────
@@ -1256,7 +1243,6 @@ def render_circle(state, my_name):
     elif pct > 0.25: tcol = "#e8a020"
     else:            tcol = "#c0392b"
 
-    # Scale radius and canvas height based on player count to avoid scrolling
     if n <= 2:
         R  = 140
         CH = 460
@@ -1395,8 +1381,6 @@ def render_circle(state, my_name):
         cy0 = py - CRD_H / 2
 
         is_active = (i == cur_idx)
-        # In same-device mode, both cards show "you" feel since it's one screen
-        is_me     = p["name"] == my_name or same_device
         is_dead   = not p["alive"]
         lives     = p["lives"]
 
@@ -1590,6 +1574,7 @@ for key, default in [
     ("screen", "home"), ("room_code", None),
     ("player_name", None), ("form_key", 0), ("last_error", ""),
     ("voted_rematch", False), ("how_lang", "en"),
+    ("balloons_shown_for", None),   # tracks which game-finish we already ballooned
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -1719,7 +1704,6 @@ if st.session_state.screen == "home":
             if not n:
                 st.error("Enter your name first.")
             elif same_device:
-                # Store intent and show P2 name input
                 st.session_state.create_same_device = True
                 st.session_state.create_private     = private
                 st.session_state.create_p1_name     = n
@@ -1732,7 +1716,6 @@ if st.session_state.screen == "home":
                 st.session_state.create_same_device = False
                 st.rerun()
 
-        # ── Same-device P2 name prompt ────────────────────────────────────────
         if st.session_state.create_same_device:
             st.markdown("<hr>", unsafe_allow_html=True)
             st.markdown(
@@ -1764,10 +1747,10 @@ if st.session_state.screen == "home":
                 elif p2.casefold() == p1.casefold():
                     st.error("Player 2 must have a different name.")
                 else:
-                    code = gen_unique_code(private=True)  # same-device rooms are always private
+                    code = gen_unique_code(private=True)
                     create_room(code, p1, priv, same_device=True, player2_name=p2)
                     st.session_state.room_code          = code
-                    st.session_state.player_name        = p1  # P1 is "the user" for session
+                    st.session_state.player_name        = p1
                     st.session_state.screen             = "lobby"
                     st.session_state.create_same_device = False
                     st.rerun()
@@ -1833,7 +1816,6 @@ elif st.session_state.screen == "lobby":
         st.markdown(f"<div style='color:#888;font-size:0.82rem;margin-bottom:1.2rem;'>{share_hint}</div>",
                     unsafe_allow_html=True)
 
-    # Language selector — host only, not in same-device (no need to share)
     if is_host:
         if current_lang == "es" and not spanish_available:
             set_room_language(code, "en")
@@ -1973,16 +1955,23 @@ elif st.session_state.screen == "game":
         state = check_rematch_or_expire(code)
 
         if state is None:
-            st.session_state.screen       = "home"
-            st.session_state.room_code    = None
+            st.session_state.screen        = "home"
+            st.session_state.room_code     = None
             st.session_state.voted_rematch = False
+            st.session_state.balloons_shown_for = None
             st.rerun(); st.stop()
 
         if not state["finished"]:
-            st.session_state.voted_rematch = False
+            st.session_state.voted_rematch      = False
+            st.session_state.balloons_shown_for = None
             st.rerun(); st.stop()
 
-        st.balloons()
+        # ── One-shot balloons: only fire once per unique game finish ───────────
+        # Use the room code + winner name as a unique key for this finish event.
+        finish_key = f"{code}:{state.get('winner', '')}"
+        if st.session_state.balloons_shown_for != finish_key:
+            st.balloons()
+            st.session_state.balloons_shown_for = finish_key
 
         if is_fr:
             winner_label = "gagne."
@@ -2055,7 +2044,6 @@ elif st.session_state.screen == "game":
 """, unsafe_allow_html=True)
 
         if same_device:
-            # In same-device mode a single "Play Again" button handles rematch
             already = my_name in votes or st.session_state.voted_rematch
             if already:
                 st.markdown(f"<p style='color:#1a7a3f;font-size:0.88rem;text-align:center;'>✓ {already_voted}</p>",
@@ -2065,7 +2053,6 @@ elif st.session_state.screen == "game":
                 with col_r:
                     st.markdown("<div class='btn-rematch'>", unsafe_allow_html=True)
                     if st.button(rematch_btn, key="rematch_vote_btn"):
-                        # Cast vote for both players in same-device
                         for p in state["players"]:
                             cast_rematch_vote(code, p["name"])
                         st.session_state.voted_rematch = True
@@ -2074,9 +2061,10 @@ elif st.session_state.screen == "game":
                 with col_h:
                     st.markdown("<div class='btn-ghost'>", unsafe_allow_html=True)
                     if st.button(home_btn, key="end_home_btn"):
-                        st.session_state.screen        = "home"
-                        st.session_state.room_code     = None
-                        st.session_state.voted_rematch = False
+                        st.session_state.screen             = "home"
+                        st.session_state.room_code          = None
+                        st.session_state.voted_rematch      = False
+                        st.session_state.balloons_shown_for = None
                         st.rerun()
                     st.markdown("</div>", unsafe_allow_html=True)
         else:
@@ -2113,9 +2101,10 @@ elif st.session_state.screen == "game":
             with col_home:
                 st.markdown("<div class='btn-ghost'>", unsafe_allow_html=True)
                 if st.button(home_btn, key="end_home_btn"):
-                    st.session_state.screen        = "home"
-                    st.session_state.room_code     = None
-                    st.session_state.voted_rematch = False
+                    st.session_state.screen             = "home"
+                    st.session_state.room_code          = None
+                    st.session_state.voted_rematch      = False
+                    st.session_state.balloons_shown_for = None
                     st.rerun()
                 st.markdown("</div>", unsafe_allow_html=True)
 
@@ -2124,9 +2113,8 @@ elif st.session_state.screen == "game":
 
     # ── ACTIVE GAME ────────────────────────────────────────────────────────────
     cp         = state["players"][state["current_player_idx"]]
-    is_my_turn = cp["name"] == my_name or same_device  # In same-device, always show input
+    is_my_turn = cp["name"] == my_name or same_device
 
-    # In same-device mode, show whose turn it is as a banner
     if same_device:
         st.markdown(
             f"<div class='wb-active-player-banner'>🎮 {esc(cp['name'])}'s turn</div>",
@@ -2173,13 +2161,11 @@ elif st.session_state.screen == "game":
         placeholder  = f"{combo} · type your word here…"
         submit_label = "Submit →"
 
-    # In same-device mode always show form for the active player
     with st.form(key=f"wf_{st.session_state.form_key}", clear_on_submit=True):
         word      = st.text_input("word", label_visibility="collapsed", placeholder=placeholder)
         submitted = st.form_submit_button(submit_label)
 
     if submitted and word.strip():
-        # In same-device mode, submit as the current active player
         submit_name = cp["name"] if same_device else my_name
         state, result = submit_word(st.session_state.room_code, state, submit_name, word.strip())
         if result == "ok":
@@ -2197,21 +2183,18 @@ elif st.session_state.screen == "game":
         if (inputs.length > 0) {
             const inp = inputs[inputs.length - 1];
             inp.focus();
-            // Move cursor to end
             const val = inp.value;
             inp.value = '';
             inp.value = val;
         }
     }
 
-    // Try immediately, then retry a few times to catch slow renders
     focusInput();
     setTimeout(focusInput, 100);
     setTimeout(focusInput, 300);
     setTimeout(focusInput, 600);
     setTimeout(focusInput, 1000);
 
-    // Re-focus if user clicks anywhere that isn't an input
     window.parent.document.addEventListener('click', function(e) {
         const tag = e.target.tagName;
         if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'BUTTON') {
@@ -2219,7 +2202,6 @@ elif st.session_state.screen == "game":
         }
     });
 
-    // Re-focus on every keypress if nothing is focused
     window.parent.document.addEventListener('keydown', function(e) {
         const active = window.parent.document.activeElement;
         const isTyping = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA');
