@@ -1148,6 +1148,16 @@ def render_how_to_play(spanish_available, french_available):
         ("es", "Es", spanish_available),
         ("fr", "Fr", french_available),
     ]
+
+    # Check if a lang button was clicked via query param
+    qp = st.query_params.get("hlang", None)
+    if qp in ("en", "es", "fr"):
+        avail_map = {"en": True, "es": spanish_available, "fr": french_available}
+        if avail_map.get(qp, False):
+            st.session_state.how_lang = qp
+        st.query_params.clear()
+        st.rerun()
+
     current = st.session_state.how_lang
 
     col_langs, col_content = st.columns([1, 5])
@@ -1156,48 +1166,63 @@ def render_how_to_play(spanish_available, french_available):
         for lang_code, short, available in lang_options:
             is_active = current == lang_code
             if available:
-                # Wrap button in a div we can target with CSS for active state
-                wrap_id = f"wrap_how_{lang_code}"
-                st.markdown(f"<div id='{wrap_id}'>", unsafe_allow_html=True)
-                if st.button(short, key=f"how_lang_btn_{lang_code}",
-                             use_container_width=True):
-                    st.session_state.how_lang = lang_code
-                    st.rerun()
-                st.markdown("</div>", unsafe_allow_html=True)
-                # Ghost style always; active = thicker darker border only
-                active_css = (
-                    f"#{wrap_id} button {{ border: 2px solid #0f0f0f !important; }}"
-                ) if is_active else ""
-                st.markdown(f"""
-<style>
-#{wrap_id} button {{
-    background: #ffffff !important;
-    color: #0f0f0f !important;
-    border: 1.5px solid #ccc !important;
-    font-family: 'DM Mono', monospace !important;
-    font-size: 0.8rem !important;
-    font-weight: 500 !important;
-    letter-spacing: 0.06em !important;
-    padding: 0.45rem 0.5rem !important;
-    transition: border-color 0.12s !important;
-}}
-#{wrap_id} button:hover {{
-    border-color: #888 !important;
-    opacity: 1 !important;
-}}
-{active_css}
-</style>""", unsafe_allow_html=True)
-            else:
-                st.markdown(
-                    f"<div style=\"padding:0.45rem 0.5rem;border-radius:6px;"
-                    f"border:1.5px solid #ccc;background:#fff;"
-                    f"font-family:'DM Mono',monospace;font-size:0.8rem;"
-                    f"font-weight:500;letter-spacing:0.06em;color:#bbb;"
-                    f"text-align:center;cursor:not-allowed;\">"
-                    f"{short}</div>",
-                    unsafe_allow_html=True
+                active_style = (
+                    "border:2px solid #0f0f0f;font-weight:600;"
+                ) if is_active else (
+                    "border:1.5px solid #ccc;font-weight:500;"
                 )
-
+                # Render a real <button> inside an iframe (st.components.v1.html)
+                # so it is completely outside Streamlit's CSS scope
+                st.components.v1.html(f"""
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@500;600&display=swap');
+  * {{ margin:0;padding:0;box-sizing:border-box; }}
+  body {{ background:transparent; }}
+  button {{
+    width:100%;
+    padding:8px 10px;
+    border-radius:6px;
+    {active_style}
+    background:#fff;
+    font-family:'DM Mono',monospace;
+    font-size:13px;
+    letter-spacing:0.06em;
+    color:#0f0f0f;
+    cursor:pointer;
+    transition:border-color 0.12s;
+  }}
+  button:hover {{ border-color:#555; }}
+</style>
+<button onclick="window.parent.location.search='?hlang={lang_code}'">{short}</button>
+<script>
+  window.addEventListener('message', function(e) {{
+    if (e.data && e.data.type === 'hlang_ack' && e.data.code === '{lang_code}') {{
+      // acknowledged
+    }}
+  }});
+</script>
+""", height=42, scrolling=False)
+            else:
+                st.components.v1.html(f"""
+<style>
+  * {{ margin:0;padding:0;box-sizing:border-box; }}
+  body {{ background:transparent; }}
+  div {{
+    width:100%;
+    padding:8px 10px;
+    border-radius:6px;
+    border:1.5px solid #ddd;
+    background:#fff;
+    font-family:'DM Mono',monospace;
+    font-size:13px;
+    letter-spacing:0.06em;
+    color:#bbb;
+    text-align:center;
+    cursor:not-allowed;
+  }}
+</style>
+<div>{short}</div>
+""", height=42, scrolling=False)
     with col_content:
         hl = current
         if hl == "es" and not spanish_available:
