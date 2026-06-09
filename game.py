@@ -23,7 +23,7 @@ TIMER_SHRINK       = 2
 MIN_STARTING_TIMER = 8
 LIVES              = 3
 ROOM_EXPIRY        = 300
-REMATCH_TIMEOUT    = 15   # seconds before end screen auto-closes
+REMATCH_TIMEOUT    = 15
 
 ROOM_CODE_RE = re.compile(r"^(P-)?[A-Z]{4}$")
 
@@ -58,8 +58,8 @@ MEDIUM_COMBOS = [
 
 HARD_COMBOS = [
     "SCR","THR","NCH","TCH","QUA","DGE","SQU","NGU","NGL",
-    "MBL","CKL","RPH","NGS","STH","NDL","PSY","GNI","MPT", "LVE","XTR","PHR",
-    "SPL","STL","GGL","RCH","NST", "RST","NTH","SKI","NCL","NCT","RSH",
+    "MBL","CKL","RPH","NGS","STH","NDL","PSY","GNI","MPT","LVE","XTR","PHR",
+    "SPL","STL","GGL","RCH","NST","RST","NTH","SKI","NCL","NCT","RSH",
     "TION","NESS","ATIO","ICAL","ABLE","OLOG","MENT","ATOR","LITY","INES",
     "STIC","OVER","NTER","ENES","STER","RAPH","TIVE","GRAP","OGRA","NDER",
     "ILIT","LESS","TING","IONA","INTE","THER","ALLY","ALIS","TICA","ONAL",
@@ -143,17 +143,15 @@ FRENCH_HARD_COMBOS = [
     "IVES","ALES","ELLES","TEUR","TRICE","AINS","AINE",
     "EAUX","ERIE","ERES","ETTE","ETTES","DANS","POUR",
     "AVEC","PLUS","TOUS","TOUT","PRES","VERS","SEUL","MAIN",
-    "MENT","ISTE","ISTE","ISTE","TION","SION","ANCE","ENCE",
-    "IQUE","OIRE","AIRE","OIRE","IBLE","IBLE","IBLE","ABLE",
+    "MENT","ISTE","TION","SION","ANCE","ENCE",
+    "IQUE","OIRE","AIRE","IBLE","ABLE",
 ]
 
 # ─── Bad words filter ─────────────────────────────────────────────────────────
 
 BAD_WORDS = {
-    # English
     "fuck","shit","cunt","cock","dick","ass","bitch","bastard","damn","crap",
     "piss","fag","slut","whore","nigger","nigga","retard","faggot","twat",
-    # Spanish
     "joder","mierda","puta","puto","coño","cono","hostia","cabron","cabrón",
     "polla","culo","gilipollas","capullo","follar","verga","pendejo","chinga",
     "chingada","cagar","cagada","maricon","maricón","mamada","mamadas",
@@ -161,7 +159,6 @@ BAD_WORDS = {
     "hijoputa","hijoputas","me cago","ostia",
     "pene","ano","prostituta","zorra","perra","subnormal","retrasado",
     "imbecil","estupido","idiota","mongolo",
-    # French
     "merde","putain","connard","salope","connasse","foutre","enculer","baiser",
     "chier","cul","bite","couille","couilles","couillon","nichons","nichon",
     "bordel","branler","branleur","pédé","pede","nique","niquer","va te faire",
@@ -372,9 +369,12 @@ def save_room(code, state):
         with open(p, "w") as f:
             json.dump(state, f)
 
-def create_room(code, name, private):
+def create_room(code, name, private, same_device=False, player2_name=None):
+    players = [{"name": name, "lives": LIVES, "alive": True}]
+    if same_device and player2_name:
+        players.append({"name": player2_name, "lives": LIVES, "alive": True})
     state = {
-        "players": [{"name": name, "lives": LIVES, "alive": True}],
+        "players": players,
         "host": name, "is_private": private,
         "started": False, "finished": False, "winner": None,
         "current_player_idx": 0, "current_combo": "",
@@ -382,7 +382,7 @@ def create_room(code, name, private):
         "timer_start": None, "timer_duration": STARTING_TIMER,
         "last_message": "", "created_at": time.time(),
         "language": "en",
-        # rematch state
+        "same_device": same_device,
         "rematch_votes": [],
         "rematch_deadline": None,
         "rematch_started": False,
@@ -394,6 +394,7 @@ def join_room(code, name):
     state = load_room(code)
     if state is None:         return None, "Room not found."
     if state["started"]:      return None, "Game already started."
+    if state.get("same_device"): return None, "This is a same-device room."
     existing_names = [p["name"].strip().casefold() for p in state["players"]]
     if name.strip().casefold() in existing_names:
                               return None, "Name already taken."
@@ -450,7 +451,6 @@ def cleanup_rooms():
             with open(p) as f:
                 s = json.load(f)
             if s.get("finished"):
-                # Clean up finished rooms whose rematch deadline has expired
                 deadline = s.get("rematch_deadline")
                 if deadline and now > deadline + 5:
                     os.remove(p)
@@ -472,7 +472,7 @@ def list_public_rooms():
         try:
             s = load_room(code)
             if s is None: continue
-            if not s.get("is_private") and not s.get("started") and not s.get("finished"):
+            if not s.get("is_private") and not s.get("started") and not s.get("finished") and not s.get("same_device"):
                 rooms.append({"code": code, "host": s["host"],
                                "players": len(s["players"]), "created_at": s.get("created_at", 0)})
         except Exception:
@@ -482,7 +482,6 @@ def list_public_rooms():
 # ─── Rematch helpers ──────────────────────────────────────────────────────────
 
 def cast_rematch_vote(code, name):
-    """Add a player's rematch vote. Returns updated state or None."""
     try:
         with room_file_lock(code):
             state = load_room(code)
@@ -498,12 +497,6 @@ def cast_rematch_vote(code, name):
         return load_room(code)
 
 def check_rematch_or_expire(code):
-    """
-    Called on every poll while on the end screen.
-    - If rematch_deadline has passed → delete the room (everyone goes home).
-    - If all players voted rematch (or ≥2 voted and deadline passed early) → reset game.
-    Returns updated state (or None if room deleted).
-    """
     try:
         with room_file_lock(code):
             state = load_room(code)
@@ -517,7 +510,6 @@ def check_rematch_or_expire(code):
             votes    = state.get("rematch_votes", [])
             total    = len(state["players"])
 
-            # Set deadline on first poll after game ends
             if deadline is None:
                 state["rematch_deadline"] = now + REMATCH_TIMEOUT
                 save_room(code, state)
@@ -527,14 +519,17 @@ def check_rematch_or_expire(code):
             enough_voted = len(votes) >= 2
             time_up      = now >= deadline
 
-            # Trigger rematch: everyone voted, OR time is up and ≥2 voted
             if all_voted or (time_up and enough_voted):
                 _reset_for_rematch(state)
                 save_room(code, state)
                 return state
 
-            # Time up, not enough votes → delete room
             if time_up and not enough_voted:
+                # For same-device: also allow single-player rematch vote
+                if state.get("same_device") and len(votes) >= 1:
+                    _reset_for_rematch(state)
+                    save_room(code, state)
+                    return state
                 p = room_path(code)
                 if os.path.exists(p):
                     os.remove(p)
@@ -546,7 +541,6 @@ def check_rematch_or_expire(code):
         return load_room(code)
 
 def _reset_for_rematch(state):
-    """Mutate state in place to reset to a fresh game keeping all players."""
     for p in state["players"]:
         p["lives"] = LIVES
         p["alive"] = True
@@ -790,6 +784,14 @@ h1, h2, h3 { font-family: 'DM Serif Display', serif !important; color: var(--ink
     opacity: 1 !important;
 }
 
+.btn-amber .stButton button {
+    background: var(--amber) !important;
+    color: #3a1f00 !important;
+}
+.btn-amber .stButton button:hover {
+    opacity: 0.88 !important;
+}
+
 .btn-rematch .stButton button {
     background: var(--amber) !important;
     color: #3a1f00 !important;
@@ -920,11 +922,6 @@ hr { border-color: var(--border) !important; }
     padding: 1rem 0;
 }
 
-[data-testid="stVerticalBlock"] > [data-testid="stVerticalBlock"] > div:has(button[kind="secondary"]) {
-    margin-top: -0.4rem;
-    margin-bottom: 0.35rem;
-}
-
 .wb-how-card {
     background: var(--card);
     border: 1.5px solid var(--border);
@@ -985,20 +982,77 @@ hr { border-color: var(--border) !important; }
     margin: 0 0.1rem;
     vertical-align: middle;
 }
-.wb-how-heart {
-    color: #c0392b;
-    font-size: 0.9rem;
+.wb-how-heart { color: #c0392b; font-size: 0.9rem; }
+.wb-how-divider { border: none; border-top: 1px solid var(--border); margin: 1.1rem 0; }
+
+/* How to play lang selector */
+.wb-lang-btn-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding-top: 0.15rem;
 }
-.wb-how-divider {
-    border: none;
-    border-top: 1px solid var(--border);
-    margin: 1.1rem 0;
+.wb-lang-btn {
+    display: block;
+    width: 100%;
+    padding: 0.45rem 0.5rem;
+    border-radius: 6px;
+    border: 1.5px solid var(--border);
+    background: var(--card);
+    font-family: 'DM Mono', monospace;
+    font-size: 0.78rem;
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    color: var(--ink);
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.12s;
+}
+.wb-lang-btn:hover { border-color: var(--ink); }
+.wb-lang-btn.active {
+    background: var(--ink) !important;
+    color: var(--paper) !important;
+    border-color: var(--ink) !important;
+}
+.wb-lang-btn.disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
+/* Same-device badge */
+.wb-same-device-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: #fff8ec;
+    border: 1.5px solid #f0cc80;
+    color: #7a4800;
+    border-radius: 6px;
+    padding: 0.35rem 0.8rem;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.75rem;
+    letter-spacing: 0.06em;
+    font-weight: 500;
+    margin-bottom: 0.8rem;
+}
+.wb-active-player-banner {
+    text-align: center;
+    padding: 0.6rem 1rem;
+    border-radius: 8px;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.85rem;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    background: #fffbf0;
+    border: 1.5px solid var(--amber);
+    color: #7a4800;
+    margin-bottom: 1rem;
 }
 
 /* Rematch countdown bar */
-.wb-countdown-wrap {
-    margin: 1.2rem 0 0.5rem;
-}
+.wb-countdown-wrap { margin: 1.2rem 0 0.5rem; }
 .wb-countdown-bar-bg {
     background: var(--border);
     border-radius: 99px;
@@ -1041,6 +1095,129 @@ hr { border-color: var(--border) !important; }
 </style>
 """, unsafe_allow_html=True)
 
+# ─── How to Play content per language ────────────────────────────────────────
+
+HOW_TO_PLAY = {
+    "en": {
+        "basics_title": "THE BASICS",
+        "basics_text": "Hot Word is a multiplayer word game where everyone sits around a ticking bomb. Each round, a letter combo appears on the bomb — your job is to type any real word that <em>contains</em> that combo before the timer hits zero.",
+        "round_title": "HOW A ROUND WORKS",
+        "rules": [
+            ("01", 'A combo lights up on the bomb — for example <span class="wb-how-combo-demo">STR</span>. It\'s your turn to defuse it.'),
+            ("02", 'Type any valid English word that contains those letters in order. <span class="wb-how-combo-word">street</span>, <span class="wb-how-combo-word">strong</span>, and <span class="wb-how-combo-word">destroy</span> would all work. Made-up words and words already used this game don\'t count.'),
+            ("03", 'Submit before the clock runs out. If you don\'t, you lose a life <span class="wb-how-heart">♥</span>. Lose all three and you\'re eliminated.'),
+            ("04", "Play passes to the next person. The timer gets a little shorter each round, so the pressure builds the longer the game goes."),
+        ],
+        "winning_title": "WINNING",
+        "winning_text": "Last player with at least one life remaining wins. Good luck — and think fast.",
+    },
+    "es": {
+        "basics_title": "LO BÁSICO",
+        "basics_text": "Hot Word es un juego de palabras multijugador donde todos rodean una bomba a punto de explotar. Cada ronda, aparece una combinación de letras en la bomba — tu misión es escribir cualquier palabra real que <em>contenga</em> esa combinación antes de que el temporizador llegue a cero.",
+        "round_title": "CÓMO FUNCIONA UNA RONDA",
+        "rules": [
+            ("01", 'Aparece una combinación en la bomba — por ejemplo <span class="wb-how-combo-demo">STR</span>. Es tu turno de desactivarla.'),
+            ("02", 'Escribe cualquier palabra válida en español que contenga esas letras en orden. <span class="wb-how-combo-word">estrés</span>, <span class="wb-how-combo-word">estrella</span> y <span class="wb-how-combo-word">destruir</span> servirían. Las palabras inventadas o ya usadas no cuentan.'),
+            ("03", 'Envía antes de que se acabe el tiempo. Si no lo haces, pierdes una vida <span class="wb-how-heart">♥</span>. Pierde las tres y quedas eliminado.'),
+            ("04", "El turno pasa a la siguiente persona. El temporizador se acorta un poco cada ronda, así que la presión aumenta cuanto más dura el juego."),
+        ],
+        "winning_title": "CÓMO GANAR",
+        "winning_text": "Gana el último jugador con al menos una vida. Buena suerte — y piensa rápido.",
+    },
+    "fr": {
+        "basics_title": "LES BASES",
+        "basics_text": "Hot Word est un jeu de mots multijoueur où tout le monde est assis autour d'une bombe qui tic-tac. Chaque tour, une combinaison de lettres apparaît sur la bombe — votre mission est de taper n'importe quel mot réel qui <em>contient</em> cette combinaison avant que le minuteur atteigne zéro.",
+        "round_title": "COMMENT SE DÉROULE UN TOUR",
+        "rules": [
+            ("01", 'Une combinaison s\'allume sur la bombe — par exemple <span class="wb-how-combo-demo">STR</span>. C\'est votre tour de la désamorcer.'),
+            ("02", 'Tapez n\'importe quel mot français valide contenant ces lettres dans l\'ordre. <span class="wb-how-combo-word">street</span>, <span class="wb-how-combo-word">structure</span> et <span class="wb-how-combo-word">construire</span> fonctionneraient. Les mots inventés et les mots déjà utilisés ne comptent pas.'),
+            ("03", 'Soumettez avant que le temps ne soit écoulé. Sinon, vous perdez une vie <span class="wb-how-heart">♥</span>. Perdez les trois et vous êtes éliminé.'),
+            ("04", "Le tour passe à la personne suivante. Le minuteur raccourcit un peu à chaque tour, donc la pression monte au fil du jeu."),
+        ],
+        "winning_title": "COMMENT GAGNER",
+        "winning_text": "Le dernier joueur avec au moins une vie restante gagne. Bonne chance — et pensez vite.",
+    },
+}
+
+def render_how_to_play(spanish_available, french_available):
+    if "how_lang" not in st.session_state:
+        st.session_state.how_lang = "en"
+
+    col_langs, col_content = st.columns([1, 5])
+
+    with col_langs:
+        lang_options = [
+            ("en", "🇺🇸", "En", True),
+            ("es", "🇪🇸", "Es", spanish_available),
+            ("fr", "🇫🇷", "Fr", french_available),
+        ]
+        for lang_code, flag, short, available in lang_options:
+            is_active = st.session_state.how_lang == lang_code
+            active_cls = "active" if is_active else ""
+            disabled_cls = "" if available else "disabled"
+            label = f"{flag} {short}"
+            if available:
+                if st.button(label, key=f"how_lang_btn_{lang_code}",
+                             use_container_width=True):
+                    st.session_state.how_lang = lang_code
+                    st.rerun()
+                # Manually style via markdown hack — inject active state visually
+                if is_active:
+                    st.markdown(
+                        f"<style>div[data-testid='stButton']:has(button[kind='secondary']) "
+                        f"button {{ }}</style>",
+                        unsafe_allow_html=True
+                    )
+            else:
+                # Disabled — render as grayed-out non-interactive
+                st.markdown(
+                    f"<div class='wb-lang-btn disabled' title='Word list not available'>"
+                    f"{label}</div>",
+                    unsafe_allow_html=True
+                )
+
+    with col_content:
+        hl = st.session_state.how_lang
+        # Fallback if chosen lang became unavailable
+        if hl == "es" and not spanish_available:
+            hl = "en"
+        if hl == "fr" and not french_available:
+            hl = "en"
+
+        content = HOW_TO_PLAY[hl]
+
+        # If unavailable lang was previously selected, show note
+        orig = st.session_state.how_lang
+        if (orig == "es" and not spanish_available) or (orig == "fr" and not french_available):
+            lang_name = "Spanish" if orig == "es" else "French"
+            st.markdown(
+                f"<div class='wb-msg wb-msg-bad' style='margin-bottom:1rem;'>"
+                f"⚠️ {lang_name} word list not available — showing English.</div>",
+                unsafe_allow_html=True
+            )
+
+        st.markdown(f"""
+<div class="wb-how-card">
+  <div class="wb-section-label">{content['basics_title']}</div>
+  <p>{content['basics_text']}</p>
+
+  <hr class="wb-how-divider">
+
+  <div class="wb-section-label">{content['round_title']}</div>
+  {''.join(f"""
+  <div class="wb-how-rule">
+    <span class="wb-how-rule-num">{num}</span>
+    <span class="wb-how-rule-text">{text}</span>
+  </div>""" for num, text in content['rules'])}
+
+  <hr class="wb-how-divider">
+
+  <div class="wb-section-label">{content['winning_title']}</div>
+  <p>{content['winning_text']}</p>
+</div>
+""", unsafe_allow_html=True)
+
+
 # ─── Circle renderer ──────────────────────────────────────────────────────────
 
 def render_circle(state, my_name):
@@ -1057,9 +1234,22 @@ def render_circle(state, my_name):
     elif pct > 0.25: tcol = "#e8a020"
     else:            tcol = "#c0392b"
 
-    CX, CY       = 300, 360
-    R            = 210
-    CW, CH       = 600, 680
+    # Scale radius and canvas height based on player count to avoid scrolling
+    if n <= 2:
+        R  = 140
+        CH = 460
+    elif n <= 3:
+        R  = 160
+        CH = 520
+    elif n <= 4:
+        R  = 180
+        CH = 560
+    else:
+        R  = 210
+        CH = 620
+
+    CX, CY       = 300, int(CH * 0.53)
+    CW           = 600
     CRD_W, CRD_H = 76, 90
 
     positions = []
@@ -1082,7 +1272,6 @@ def render_circle(state, my_name):
 
     combo = state.get("current_combo", "??")
 
-    # ── Fuse geometry ──────────────────────────────────────────────────────────
     P0 = (CX,       CY - 70)
     P1 = (CX + 18,  CY - 88)
     P2 = (CX + 65,  CY - 118)
@@ -1176,17 +1365,24 @@ def render_circle(state, my_name):
         spark_svg = ""
 
     cards_svg = ""
+    same_device = state.get("same_device", False)
+
     for i, p in enumerate(players):
         px, py = positions[i]
         cx0 = px - CRD_W / 2
         cy0 = py - CRD_H / 2
 
         is_active = (i == cur_idx)
-        is_me     = p["name"] == my_name
+        # In same-device mode, both cards show "you" feel since it's one screen
+        is_me     = p["name"] == my_name or same_device
         is_dead   = not p["alive"]
         lives     = p["lives"]
 
-        raw_name_disp = p["name"] + (" ·you" if is_me else "")
+        if same_device:
+            raw_name_disp = p["name"]
+        else:
+            raw_name_disp = p["name"] + (" ·you" if p["name"] == my_name else "")
+
         if len(raw_name_disp) > 9:
             raw_name_disp = raw_name_disp[:8] + "…"
         name_disp = esc(raw_name_disp)
@@ -1230,8 +1426,6 @@ def render_circle(state, my_name):
             pill_y = cy0 - 42
             badge  = f'<rect x="{pill_x}" y="{pill_y}" width="{pill_w}" height="26" rx="5" fill="#e8a020"/>'
             badge += f'<text x="{px}" y="{pill_y+18}" text-anchor="middle" font-family="DM Mono, monospace" font-size="15" font-weight="500" fill="#3a1f00" letter-spacing="3">{combo}</text>'
-            if is_me:
-                badge += f'<text x="{px}" y="{cy0-48}" text-anchor="middle" font-family="DM Mono, monospace" font-size="9" fill="#e8a020" letter-spacing="1">YOUR TURN</text>'
 
         div_y = cy0 + 34
 
@@ -1373,7 +1567,7 @@ inject_css()
 for key, default in [
     ("screen", "home"), ("room_code", None),
     ("player_name", None), ("form_key", 0), ("last_error", ""),
-    ("voted_rematch", False),
+    ("voted_rematch", False), ("how_lang", "en"),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -1485,82 +1679,79 @@ if st.session_state.screen == "home":
                     st.error(msg)
 
     with tab3:
+        if "create_same_device" not in st.session_state:
+            st.session_state.create_same_device = False
+        if "create_p2_name" not in st.session_state:
+            st.session_state.create_p2_name = ""
+
         with st.form("create_room_form"):
-            private = st.checkbox("Private room")
-            if st.form_submit_button("Create room"):
-                n = st.session_state.home_name.strip()
-                if not n:
-                    st.error("Enter your name first.")
+            private     = st.checkbox("Private room")
+            same_device = st.checkbox(
+                "📱 Same device (1v1)",
+                help="Play against someone on the same screen. Online multiplayer is disabled in this mode."
+            )
+            submitted_create = st.form_submit_button("Create room")
+
+        if submitted_create:
+            n = st.session_state.home_name.strip()
+            if not n:
+                st.error("Enter your name first.")
+            elif same_device:
+                # Store intent and show P2 name input
+                st.session_state.create_same_device = True
+                st.session_state.create_private     = private
+                st.session_state.create_p1_name     = n
+            else:
+                code = gen_unique_code(private)
+                create_room(code, n, private, same_device=False)
+                st.session_state.room_code        = code
+                st.session_state.player_name      = n
+                st.session_state.screen           = "lobby"
+                st.session_state.create_same_device = False
+                st.rerun()
+
+        # ── Same-device P2 name prompt ────────────────────────────────────────
+        if st.session_state.create_same_device:
+            st.markdown("<hr>", unsafe_allow_html=True)
+            st.markdown(
+                "<div class='wb-same-device-badge'>📱 SAME DEVICE MODE</div>",
+                unsafe_allow_html=True
+            )
+            st.markdown("<div class='wb-section-label'>Player 2 name</div>", unsafe_allow_html=True)
+
+            with st.form("p2_name_form"):
+                p2_name   = st.text_input("Player 2 name", max_chars=16,
+                                          placeholder="Enter player 2's name…",
+                                          label_visibility="collapsed")
+                col_cancel, col_go = st.columns([1, 2])
+                with col_cancel:
+                    cancel = st.form_submit_button("Cancel")
+                with col_go:
+                    go = st.form_submit_button("Start →")
+
+            if cancel:
+                st.session_state.create_same_device = False
+                st.rerun()
+
+            if go:
+                p1 = st.session_state.get("create_p1_name", "").strip()
+                p2 = p2_name.strip()
+                priv = st.session_state.get("create_private", False)
+                if not p2:
+                    st.error("Enter player 2's name.")
+                elif p2.casefold() == p1.casefold():
+                    st.error("Player 2 must have a different name.")
                 else:
-                    code = gen_unique_code(private)
-                    create_room(code, n, private)
-                    st.session_state.room_code   = code
-                    st.session_state.player_name = n
-                    st.session_state.screen      = "lobby"
+                    code = gen_unique_code(private=True)  # same-device rooms are always private
+                    create_room(code, p1, priv, same_device=True, player2_name=p2)
+                    st.session_state.room_code          = code
+                    st.session_state.player_name        = p1  # P1 is "the user" for session
+                    st.session_state.screen             = "lobby"
+                    st.session_state.create_same_device = False
                     st.rerun()
 
     with tab4:
-        st.markdown("""
-<div class="wb-how-card">
-
-  <div class="wb-section-label">The basics</div>
-  <p>
-    Hot Word is a multiplayer word game where everyone sits around a ticking bomb.
-    Each round, a letter combo appears on the bomb — your job is to type any real word
-    that <em>contains</em> that combo before the timer hits zero.
-  </p>
-
-  <hr class="wb-how-divider">
-
-  <div class="wb-section-label">How a round works</div>
-
-  <div class="wb-how-rule">
-    <span class="wb-how-rule-num">01</span>
-    <span class="wb-how-rule-text">
-      A combo lights up on the bomb — for example
-      <span class="wb-how-combo-demo">STR</span>.
-      It's your turn to defuse it.
-    </span>
-  </div>
-
-  <div class="wb-how-rule">
-    <span class="wb-how-rule-num">02</span>
-    <span class="wb-how-rule-text">
-      Type any valid English word that contains those letters in order.
-      <span class="wb-how-combo-word">street</span>,
-      <span class="wb-how-combo-word">strong</span>, and
-      <span class="wb-how-combo-word">destroy</span> would all work.
-      Made-up words and words already used this game don't count.
-    </span>
-  </div>
-
-  <div class="wb-how-rule">
-    <span class="wb-how-rule-num">03</span>
-    <span class="wb-how-rule-text">
-      Submit before the clock runs out. If you don't,
-      you lose a life <span class="wb-how-heart">♥</span>.
-      Lose all three and you're eliminated.
-    </span>
-  </div>
-
-  <div class="wb-how-rule">
-    <span class="wb-how-rule-num">04</span>
-    <span class="wb-how-rule-text">
-      Play passes to the next person. The timer gets a little shorter each round,
-      so the pressure builds the longer the game goes.
-    </span>
-  </div>
-
-  <hr class="wb-how-divider">
-
-  <div class="wb-section-label">Winning</div>
-  <p>
-    Last player with at least one life remaining wins.
-    Good luck — and think fast.
-  </p>
-
-</div>
-""", unsafe_allow_html=True)
+        render_how_to_play(spanish_available, french_available)
 
     st_autorefresh(interval=3000, key="home_refresh", limit=None)
 
@@ -1576,7 +1767,8 @@ elif st.session_state.screen == "lobby":
     if state.get("started"):
         st.session_state.screen = "game"; st.rerun(); st.stop()
 
-    code = st.session_state.room_code
+    code        = st.session_state.room_code
+    same_device = state.get("same_device", False)
 
     my_names = [p["name"] for p in state["players"]]
     if st.session_state.player_name not in my_names:
@@ -1607,11 +1799,19 @@ elif st.session_state.screen == "lobby":
         players_label = "PLAYERS"
 
     st.markdown(f"<div class='wb-title' style='font-size:2rem;'>{lobby_title}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='wb-section-label'>{privacy_label} room</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='wb-lobby-code'>{esc(code)}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div style='color:#888;font-size:0.82rem;margin-bottom:1.2rem;'>{share_hint}</div>",
-                unsafe_allow_html=True)
 
+    if same_device:
+        st.markdown(
+            "<div class='wb-same-device-badge'>📱 SAME DEVICE MODE</div>",
+            unsafe_allow_html=True
+        )
+    else:
+        st.markdown(f"<div class='wb-section-label'>{privacy_label} room</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='wb-lobby-code'>{esc(code)}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='color:#888;font-size:0.82rem;margin-bottom:1.2rem;'>{share_hint}</div>",
+                    unsafe_allow_html=True)
+
+    # Language selector — host only, not in same-device (no need to share)
     if is_host:
         if current_lang == "es" and not spanish_available:
             set_room_language(code, "en")
@@ -1638,7 +1838,6 @@ elif st.session_state.screen == "lobby":
             st.caption("⚠️ Spanish mode unavailable: words_spanish.txt is missing.")
         if not french_available:
             st.caption("⚠️ French mode unavailable: words_french.txt is missing.")
-
     else:
         flag, label = LANG_LABELS.get(current_lang, ("", current_lang))
         st.caption(f"{flag} {label}")
@@ -1646,13 +1845,16 @@ elif st.session_state.screen == "lobby":
     st.markdown(f"<div class='wb-section-label'>{players_label}</div>", unsafe_allow_html=True)
     for idx, p in enumerate(state["players"]):
         crown = " 👑" if p["name"] == state["host"] else ""
-        if is_fr:
+        if same_device:
+            you = f" · P{idx+1}"
+        elif is_fr:
             you = " · vous" if p["name"] == st.session_state.player_name else ""
         elif is_es:
             you = " · tú" if p["name"] == st.session_state.player_name else ""
         else:
             you = " · you" if p["name"] == st.session_state.player_name else ""
-        can_kick = is_host and p["name"] != st.session_state.player_name
+
+        can_kick = is_host and p["name"] != st.session_state.player_name and not same_device
         st.markdown(
             f"<div class='wb-player-row'>"
             f"<span>{esc(p['name'])}{crown}</span>"
@@ -1722,7 +1924,8 @@ elif st.session_state.screen == "lobby":
             st.markdown(f"<p style='color:#888;font-size:0.88rem;padding-top:0.5rem;'>{waiting_msg}</p>",
                         unsafe_allow_html=True)
 
-    st_autorefresh(interval=2000, key="lobby_refresh")
+    if not same_device:
+        st_autorefresh(interval=2000, key="lobby_refresh")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # GAME
@@ -1735,31 +1938,28 @@ elif st.session_state.screen == "game":
         st.error("Room lost.")
         st.session_state.screen = "home"; st.rerun()
 
-    state   = check_timer(st.session_state.room_code, state)
-    my_name = st.session_state.player_name
-    lang    = state.get("language", "en")
-    is_es   = lang == "es"
-    is_fr   = lang == "fr"
+    state       = check_timer(st.session_state.room_code, state)
+    my_name     = st.session_state.player_name
+    lang        = state.get("language", "en")
+    is_es       = lang == "es"
+    is_fr       = lang == "fr"
+    same_device = state.get("same_device", False)
 
     # ── END SCREEN ─────────────────────────────────────────────────────────────
     if state["finished"]:
-        # Poll rematch / expiry logic every refresh
         code  = st.session_state.room_code
         state = check_rematch_or_expire(code)
 
-        # Room was deleted (expired, not enough votes)
         if state is None:
             st.session_state.screen       = "home"
             st.session_state.room_code    = None
             st.session_state.voted_rematch = False
             st.rerun(); st.stop()
 
-        # Rematch was triggered → jump straight to game
         if not state["finished"]:
             st.session_state.voted_rematch = False
             st.rerun(); st.stop()
 
-        # Still on end screen — render it
         st.balloons()
 
         if is_fr:
@@ -1788,7 +1988,6 @@ elif st.session_state.screen == "game":
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # ── Countdown bar ───────────────────────────────────────────────────
         deadline    = state.get("rematch_deadline")
         now_t       = time.time()
         time_left   = max(0.0, (deadline - now_t)) if deadline else float(REMATCH_TIMEOUT)
@@ -1833,51 +2032,84 @@ elif st.session_state.screen == "game":
 </div>
 """, unsafe_allow_html=True)
 
-        if votes:
-            st.markdown(
-                f"<div class='wb-vote-status'>{vote_info} — {voted_names_html}</div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f"<div class='wb-vote-status'>{vote_info}</div>",
-                unsafe_allow_html=True,
-            )
-
-        col_rematch, col_home = st.columns([1, 1])
-
-        with col_rematch:
-            if st.session_state.voted_rematch or (my_name in votes):
-                st.markdown(f"<p style='color:#1a7a3f;font-size:0.88rem;padding-top:0.6rem;text-align:center;'>✓ {already_voted}</p>",
-                            unsafe_allow_html=True)
-            elif total < 2:
-                st.markdown(f"<p style='color:#888;font-size:0.88rem;padding-top:0.6rem;'>{need_two}</p>",
+        if same_device:
+            # In same-device mode a single "Play Again" button handles rematch
+            already = my_name in votes or st.session_state.voted_rematch
+            if already:
+                st.markdown(f"<p style='color:#1a7a3f;font-size:0.88rem;text-align:center;'>✓ {already_voted}</p>",
                             unsafe_allow_html=True)
             else:
-                st.markdown("<div class='btn-rematch'>", unsafe_allow_html=True)
-                if st.button(rematch_btn, key="rematch_vote_btn"):
-                    updated = cast_rematch_vote(code, my_name)
-                    st.session_state.voted_rematch = True
-                    if updated is not None:
-                        state = updated
+                col_r, col_h = st.columns([1, 1])
+                with col_r:
+                    st.markdown("<div class='btn-rematch'>", unsafe_allow_html=True)
+                    if st.button(rematch_btn, key="rematch_vote_btn"):
+                        # Cast vote for both players in same-device
+                        for p in state["players"]:
+                            cast_rematch_vote(code, p["name"])
+                        st.session_state.voted_rematch = True
+                        st.rerun()
+                    st.markdown("</div>", unsafe_allow_html=True)
+                with col_h:
+                    st.markdown("<div class='btn-ghost'>", unsafe_allow_html=True)
+                    if st.button(home_btn, key="end_home_btn"):
+                        st.session_state.screen        = "home"
+                        st.session_state.room_code     = None
+                        st.session_state.voted_rematch = False
+                        st.rerun()
+                    st.markdown("</div>", unsafe_allow_html=True)
+        else:
+            if votes:
+                st.markdown(
+                    f"<div class='wb-vote-status'>{vote_info} — {voted_names_html}</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f"<div class='wb-vote-status'>{vote_info}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            col_rematch, col_home = st.columns([1, 1])
+
+            with col_rematch:
+                if st.session_state.voted_rematch or (my_name in votes):
+                    st.markdown(f"<p style='color:#1a7a3f;font-size:0.88rem;padding-top:0.6rem;text-align:center;'>✓ {already_voted}</p>",
+                                unsafe_allow_html=True)
+                elif total < 2:
+                    st.markdown(f"<p style='color:#888;font-size:0.88rem;padding-top:0.6rem;'>{need_two}</p>",
+                                unsafe_allow_html=True)
+                else:
+                    st.markdown("<div class='btn-rematch'>", unsafe_allow_html=True)
+                    if st.button(rematch_btn, key="rematch_vote_btn"):
+                        updated = cast_rematch_vote(code, my_name)
+                        st.session_state.voted_rematch = True
+                        if updated is not None:
+                            state = updated
+                        st.rerun()
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+            with col_home:
+                st.markdown("<div class='btn-ghost'>", unsafe_allow_html=True)
+                if st.button(home_btn, key="end_home_btn"):
+                    st.session_state.screen        = "home"
+                    st.session_state.room_code     = None
+                    st.session_state.voted_rematch = False
                     st.rerun()
                 st.markdown("</div>", unsafe_allow_html=True)
-
-        with col_home:
-            st.markdown("<div class='btn-ghost'>", unsafe_allow_html=True)
-            if st.button(home_btn, key="end_home_btn"):
-                st.session_state.screen        = "home"
-                st.session_state.room_code     = None
-                st.session_state.voted_rematch = False
-                st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
 
         st_autorefresh(interval=1000, key="end_refresh")
         st.stop()
 
     # ── ACTIVE GAME ────────────────────────────────────────────────────────────
     cp         = state["players"][state["current_player_idx"]]
-    is_my_turn = cp["name"] == my_name
+    is_my_turn = cp["name"] == my_name or same_device  # In same-device, always show input
+
+    # In same-device mode, show whose turn it is as a banner
+    if same_device:
+        st.markdown(
+            f"<div class='wb-active-player-banner'>🎮 {esc(cp['name'])}'s turn</div>",
+            unsafe_allow_html=True,
+        )
 
     render_circle(state, my_name)
 
@@ -1890,71 +2122,88 @@ elif st.session_state.screen == "game":
             text = msg.split(":", 1)[1]
             st.markdown(f"<div class='wb-msg wb-msg-bad'>{text}</div>", unsafe_allow_html=True)
 
-    if is_my_turn:
-        combo = state["current_combo"]
-        if is_fr:
-            turn_label = "Votre tour — saisissez un mot contenant"
-        elif is_es:
-            turn_label = "Tu turno &mdash; escribe una palabra que contenga"
-        else:
-            turn_label = "Your turn &mdash; type a word containing"
-        st.markdown(
-            f"<div class='wb-turn-label'>{turn_label} "
-            f"<span style='font-size:1.1rem;letter-spacing:0.12em;color:#e8a020;'>{combo}</span></div>",
-            unsafe_allow_html=True,
-        )
+    combo = state["current_combo"]
 
-        if st.session_state.last_error:
-            st.markdown(f"<div class='wb-msg wb-msg-bad'>{esc(st.session_state.last_error)}</div>",
-                        unsafe_allow_html=True)
-
-        if is_fr:
-            placeholder  = f"{combo} · saisissez votre mot ici…"
-            submit_label = "Valider →"
-        elif is_es:
-            placeholder  = f"{combo} · escribe tu palabra aquí…"
-            submit_label = "Enviar →"
-        else:
-            placeholder  = f"{combo} · type your word here…"
-            submit_label = "Submit →"
-
-        with st.form(key=f"wf_{st.session_state.form_key}", clear_on_submit=True):
-            word      = st.text_input("word", label_visibility="collapsed", placeholder=placeholder)
-            submitted = st.form_submit_button(submit_label)
-
-        if submitted and word.strip():
-            state, result = submit_word(st.session_state.room_code, state, my_name, word.strip())
-            if result == "ok":
-                st.session_state.form_key  += 1
-                st.session_state.last_error = ""
-            else:
-                st.session_state.last_error = result
-            st.rerun()
+    if is_fr:
+        turn_label = "Votre tour — saisissez un mot contenant"
+    elif is_es:
+        turn_label = "Tu turno &mdash; escribe una palabra que contenga"
     else:
-        if is_fr:
-            waiting_label = f"En attente de <strong>{esc(cp['name'])}</strong>…"
-        elif is_es:
-            waiting_label = f"Esperando a <strong>{esc(cp['name'])}</strong>…"
+        turn_label = "Your turn &mdash; type a word containing"
+
+    st.markdown(
+        f"<div class='wb-turn-label'>{turn_label} "
+        f"<span style='font-size:1.1rem;letter-spacing:0.12em;color:#e8a020;'>{combo}</span></div>",
+        unsafe_allow_html=True,
+    )
+
+    if st.session_state.last_error:
+        st.markdown(f"<div class='wb-msg wb-msg-bad'>{esc(st.session_state.last_error)}</div>",
+                    unsafe_allow_html=True)
+
+    if is_fr:
+        placeholder  = f"{combo} · saisissez votre mot ici…"
+        submit_label = "Valider →"
+    elif is_es:
+        placeholder  = f"{combo} · escribe tu palabra aquí…"
+        submit_label = "Enviar →"
+    else:
+        placeholder  = f"{combo} · type your word here…"
+        submit_label = "Submit →"
+
+    # In same-device mode always show form for the active player
+    with st.form(key=f"wf_{st.session_state.form_key}", clear_on_submit=True):
+        word      = st.text_input("word", label_visibility="collapsed", placeholder=placeholder)
+        submitted = st.form_submit_button(submit_label)
+
+    if submitted and word.strip():
+        # In same-device mode, submit as the current active player
+        submit_name = cp["name"] if same_device else my_name
+        state, result = submit_word(st.session_state.room_code, state, submit_name, word.strip())
+        if result == "ok":
+            st.session_state.form_key  += 1
+            st.session_state.last_error = ""
         else:
-            waiting_label = f"Waiting for <strong>{esc(cp['name'])}</strong>…"
-        st.markdown(
-            f"<div class='wb-waiting-label'>{waiting_label}</div>",
-            unsafe_allow_html=True
-        )
-        st.session_state.last_error = ""
+            st.session_state.last_error = result
+        st.rerun()
 
     st.components.v1.html("""
     <script>
-    setTimeout(() => {
-        const inputs = window.parent.document.querySelectorAll('input[type="text"]');
-        if (inputs.length > 0) inputs[inputs.length - 1].focus();
-    }, 200);
+    function focusInput() {
+        const doc = window.parent.document;
+        const inputs = doc.querySelectorAll('input[type="text"]');
+        if (inputs.length > 0) {
+            const inp = inputs[inputs.length - 1];
+            inp.focus();
+            // Move cursor to end
+            const val = inp.value;
+            inp.value = '';
+            inp.value = val;
+        }
+    }
 
+    // Try immediately, then retry a few times to catch slow renders
+    focusInput();
+    setTimeout(focusInput, 100);
+    setTimeout(focusInput, 300);
+    setTimeout(focusInput, 600);
+    setTimeout(focusInput, 1000);
+
+    // Re-focus if user clicks anywhere that isn't an input
+    window.parent.document.addEventListener('click', function(e) {
+        const tag = e.target.tagName;
+        if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'BUTTON') {
+            setTimeout(focusInput, 50);
+        }
+    });
+
+    // Re-focus on every keypress if nothing is focused
     window.parent.document.addEventListener('keydown', function(e) {
         const active = window.parent.document.activeElement;
         const isTyping = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA');
-        if (!isTyping && e.key === 'c') {
-            e.stopPropagation();
+        if (!isTyping) {
+            if (e.key === 'c') { e.stopPropagation(); }
+            focusInput();
         }
     }, true);
     </script>
