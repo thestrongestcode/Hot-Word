@@ -1,45 +1,4 @@
-"""
-Hot Word — multiplayer word-bomb game (Streamlit).
-
-This revision fixes the issues found in the code audit:
-
-  GAMEPLAY BUGS
-  • Input form / "Your turn" label now only shown to the active player
-    (the orphaned .wb-waiting-label class is used again for everyone else).
-  • How to Play tab actually renders its content (HOW_TO_PLAY was unused).
-  • Ghost players: a "Leave game" action exists mid-game; the end-screen
-    Home button removes you from the room; rematches only include voters.
-  • st.balloons() fires once per game end instead of every refresh tick.
-
-  CONCURRENCY
-  • join/leave/kick/set_language now run under the room file lock
-    (via the previously-unused mutate_room helper).
-  • Stale lock files (crashed process) are detected by age and reclaimed,
-    and cleanup_rooms() also removes orphaned .lock files.
-  • check_timer only acquires the lock when the timer has actually expired,
-    and only writes the room file when something changed.
-  • submit_word rejects submissions that arrive after the fuse hit zero.
-  • cleanup_rooms() no longer deletes finished rooms with a winning
-    rematch vote pending.
-
-  COMPATIBILITY (older / managed laptops)
-  • Removed the :has() CSS selector and the postMessage/hidden-button
-    hack in the How to Play language picker (replaced with st.radio).
-  • Ship a .streamlit/config.toml with `base = "light"` so dark-mode
-    devices don't render invisible text.
-
-  NEW FEATURE
-  • "Mixed" language mode (🌍): words from English, Spanish, or French
-    all count; combo pools are merged. Available when all three word
-    files exist.
-
-  VISUAL
-  • The fuse is rebuilt: it now curves from the bomb's nozzle into the
-    gap *between* player cards (angle scales with player count), so it
-    can never overlap or touch a card or its combo badge.
-  • Combos with no matching dictionary word are filtered out at load
-    time, so an unanswerable combo can't be dealt.
-"""
+# Hot Word — multiplayer word-bomb game (Streamlit).
 
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
@@ -69,6 +28,11 @@ ROOM_EXPIRY        = 300
 REMATCH_TIMEOUT    = 15
 LOCK_STALE_SECS    = 10     # a lock older than this is from a dead process
 LOCK_ORPHAN_SECS   = 30     # cleanup removes .lock files older than this
+
+# How wide the game board is DRAWN on screen. The SVG's internal coordinate
+# space stays 600 wide; shrinking this scales the whole board down
+# proportionally so the game screen fits without scrolling.
+BOARD_DISPLAY_W    = 580
 
 ROOM_CODE_RE = re.compile(r"^(P-)?[A-Z]{4}$")
 
@@ -978,6 +942,14 @@ def inject_css():
 }
 [data-testid="stHeader"], footer, header, #MainMenu { visibility: hidden; }
 
+/* Streamlit ships ~6rem of top padding and ~10rem of bottom padding by
+   default; that alone forces the game screen to scroll. Reclaim it. */
+.block-container {
+    padding-top: 0.45rem !important;
+    padding-bottom: 0.45rem !important;
+    max-width: 860px !important;
+}
+
 h1, h2, h3 { font-family: 'DM Serif Display', serif !important; color: var(--ink); }
 
 .stTextInput input {
@@ -1018,6 +990,20 @@ h1, h2, h3 { font-family: 'DM Serif Display', serif !important; color: var(--ink
 }
 .btn-ghost .stButton button:hover {
     border-color: var(--ink) !important;
+    opacity: 1 !important;
+}
+
+/* Compact kick button so it lines up with a player row. */
+.btn-kick .stButton button {
+    background: transparent !important;
+    color: var(--danger) !important;
+    border: 1.5px solid var(--border) !important;
+    font-size: 0.85rem !important;
+    padding: 0.45rem 0.9rem !important;
+    width: 100%;
+}
+.btn-kick .stButton button:hover {
+    border-color: var(--danger) !important;
     opacity: 1 !important;
 }
 
@@ -1132,12 +1118,12 @@ hr { border-color: var(--border) !important; }
 }
 .wb-msg {
     text-align: center;
-    padding: 0.55rem 1rem;
+    padding: 0.45rem 1rem;
     border-radius: 6px;
     font-family: 'DM Sans', sans-serif;
     font-size: 0.9rem;
     font-weight: 500;
-    margin: 0.5rem 0 1rem;
+    margin: 0.3rem 0 0.5rem;
     letter-spacing: 0.01em;
 }
 .wb-msg-good { background: #edf7f1; color: var(--success); border: 1px solid #b8dfc8; }
@@ -1150,14 +1136,14 @@ hr { border-color: var(--border) !important; }
     text-transform: uppercase;
     color: var(--amber);
     font-weight: 500;
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.3rem;
 }
 .wb-waiting-label {
     text-align: center;
     font-family: 'DM Sans', sans-serif;
     font-size: 0.9rem;
     color: var(--muted);
-    padding: 1rem 0;
+    padding: 0.5rem 0;
 }
 
 .wb-how-card {
@@ -1249,7 +1235,7 @@ hr { border-color: var(--border) !important; }
 }
 .wb-active-player-banner {
     text-align: center;
-    padding: 0.6rem 1rem;
+    padding: 0.4rem 1rem;
     border-radius: 8px;
     font-family: 'DM Mono', monospace;
     font-size: 0.85rem;
@@ -1259,7 +1245,17 @@ hr { border-color: var(--border) !important; }
     background: #fffbf0;
     border: 1.5px solid var(--amber);
     color: #7a4800;
-    margin-bottom: 1rem;
+    margin-bottom: 0.35rem;
+}
+
+/* Compact active-game controls so the larger board still fits on one screen. */
+.stTextInput { margin-bottom: 0 !important; }
+[data-testid="stTextInput"] { margin-bottom: 0 !important; }
+.wb-top-exit { margin: 0 0 0.2rem 0; }
+.wb-top-exit .stButton button {
+    padding: 0.35rem 0.8rem !important;
+    font-size: 0.8rem !important;
+    border-radius: 6px !important;
 }
 
 /* Rematch countdown bar */
@@ -1426,6 +1422,13 @@ def render_circle(state, my_name):
     CX, CY       = 300, int(CH * 0.53)
     CW           = 600
     CRD_W, CRD_H = 76, 90
+
+    # The board is DISPLAYED narrower than its 600px coordinate space —
+    # the SVG viewBox scales the whole drawing down proportionally, so the
+    # geometry math above is untouched but the on-screen footprint shrinks
+    # enough that the full game screen fits without scrolling.
+    DISPLAY_W = BOARD_DISPLAY_W
+    DISPLAY_H = int(CH * DISPLAY_W / CW)
 
     positions = []
     for i in range(n):
@@ -1712,7 +1715,7 @@ def render_circle(state, my_name):
     full_html = f"""
     <div style="background:#faf9f6;padding:0;margin:0;">
     <svg width="100%" viewBox="0 0 {CW} {CH}" xmlns="http://www.w3.org/2000/svg"
-         style="display:block;max-width:{CW}px;margin:0 auto;">
+         style="display:block;max-width:{DISPLAY_W}px;margin:0 auto;">
         {arrow_svg}
         {orbit_svg}
         {bomb_svg}
@@ -1721,7 +1724,7 @@ def render_circle(state, my_name):
     </div>
     <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500&display=swap" rel="stylesheet">
     """
-    st.components.v1.html(full_html, height=CH)
+    st.components.v1.html(full_html, height=DISPLAY_H)
 
 
 # ─── Session helpers ──────────────────────────────────────────────────────────
@@ -2040,13 +2043,14 @@ elif st.session_state.screen == "lobby":
             you = " · you" if p["name"] == st.session_state.player_name else ""
 
         can_kick = is_host and p["name"] != st.session_state.player_name and not same_device
-        st.markdown(
+
+        row_html = (
             f"<div class='wb-player-row'>"
             f"<span>{esc(p['name'])}{crown}</span>"
             f"<span style='color:#888;font-size:0.82rem;'>{you}</span>"
-            f"</div>",
-            unsafe_allow_html=True,
+            f"</div>"
         )
+
         if can_kick:
             if is_fr:
                 kick_label = "Expulser"
@@ -2054,9 +2058,19 @@ elif st.session_state.screen == "lobby":
                 kick_label = "Expulsar"
             else:
                 kick_label = "Remove"
-            if st.button(kick_label, key=f"kick_{idx}"):
-                kick_player(code, st.session_state.player_name, p["name"])
-                st.rerun()
+            # The kick button lives in a column NEXT TO the player row,
+            # not underneath it.
+            col_row, col_kick = st.columns([4, 1], vertical_alignment="center")
+            with col_row:
+                st.markdown(row_html, unsafe_allow_html=True)
+            with col_kick:
+                st.markdown("<div class='btn-kick'>", unsafe_allow_html=True)
+                if st.button(kick_label, key=f"kick_{idx}"):
+                    kick_player(code, st.session_state.player_name, p["name"])
+                    st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+        else:
+            st.markdown(row_html, unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
     col_leave, col_start = st.columns([1, 2])
@@ -2298,6 +2312,31 @@ elif st.session_state.screen == "game":
     # ── ACTIVE GAME ────────────────────────────────────────────────────────────
     st.session_state.celebrated = False
 
+    # Top-left exit/home control. Keeping it here removes the bottom button so
+    # the word input stays visible without scrolling.
+    me = next((p for p in state["players"] if p["name"] == my_name), None)
+    exit_col, _ = st.columns([1.1, 6])
+    with exit_col:
+        st.markdown("<div class='btn-ghost wb-top-exit'>", unsafe_allow_html=True)
+        if same_device:
+            exit_label = "← Fin" if is_fr else ("← Fin" if is_es else "← End")
+            if st.button(exit_label, key="leave_game_btn"):
+                delete_room(st.session_state.room_code)
+                go_home()
+                st.rerun()
+        elif me is not None and me["alive"]:
+            exit_label = "← Quitter" if is_fr else ("← Salir" if is_es else "← Exit")
+            if st.button(exit_label, key="leave_game_btn"):
+                leave_game(st.session_state.room_code, my_name)
+                go_home()
+                st.rerun()
+        else:
+            exit_label = "← Accueil" if is_fr else ("← Inicio" if is_es else "← Home")
+            if st.button(exit_label, key="leave_game_btn"):
+                go_home()
+                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
     cp         = state["players"][state["current_player_idx"]]
     is_my_turn = cp["name"] == my_name or same_device
 
@@ -2346,24 +2385,22 @@ elif st.session_state.screen == "game":
                         unsafe_allow_html=True)
 
         if is_fr:
-            placeholder  = f"{combo} · saisissez votre mot ici…"
-            submit_label = "Valider →"
+            placeholder = f"{combo} · saisissez votre mot ici…"
         elif is_es:
-            placeholder  = f"{combo} · escribe tu palabra aquí…"
-            submit_label = "Enviar →"
+            placeholder = f"{combo} · escribe tu palabra aquí…"
         else:
-            placeholder  = f"{combo} · type your word here…"
-            submit_label = "Submit →"
+            placeholder = f"{combo} · type your word here…"
 
-        with st.form(key=f"wf_{st.session_state.form_key}", clear_on_submit=True):
-            word      = st.text_input("word", label_visibility="collapsed", placeholder=placeholder)
-            submitted = st.form_submit_button(submit_label)
+        input_key = f"wf_{st.session_state.form_key}"
+        word = st.text_input("word", key=input_key, label_visibility="collapsed", placeholder=placeholder)
 
-        if submitted and word.strip():
+        # No visible Submit button: Streamlit sends the new value when the
+        # player presses Enter/Return (or Done on many phone keyboards).
+        if word.strip():
             submit_name = cp["name"] if same_device else my_name
             state, result = submit_word(st.session_state.room_code, state, submit_name, word.strip())
+            st.session_state.form_key += 1   # clears the input after every attempt
             if result == "ok":
-                st.session_state.form_key  += 1
                 st.session_state.last_error = ""
             else:
                 st.session_state.last_error = result
@@ -2421,28 +2458,5 @@ elif st.session_state.screen == "game":
             f"<span style='font-family:DM Mono,monospace;color:#e8a020;letter-spacing:0.12em;'>{combo}</span></div>",
             unsafe_allow_html=True,
         )
-
-    # ── Leave game (mid-game) ─────────────────────────────────────────────────
-    me = next((p for p in state["players"] if p["name"] == my_name), None)
-    st.markdown("<div class='btn-ghost'>", unsafe_allow_html=True)
-    if same_device:
-        end_label = "Terminer la partie" if is_fr else ("Terminar la partida" if is_es else "End game")
-        if st.button(end_label, key="leave_game_btn"):
-            delete_room(st.session_state.room_code)
-            go_home()
-            st.rerun()
-    elif me is not None and me["alive"]:
-        leave_label = "Quitter la partie" if is_fr else ("Abandonar la partida" if is_es else "Leave game")
-        if st.button(leave_label, key="leave_game_btn"):
-            leave_game(st.session_state.room_code, my_name)
-            go_home()
-            st.rerun()
-    else:
-        # Eliminated spectators can also go home cleanly.
-        home_label = "Accueil" if is_fr else ("Inicio" if is_es else "Back to home")
-        if st.button(home_label, key="leave_game_btn"):
-            go_home()
-            st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
 
     st_autorefresh(interval=1000, key="game_refresh")
