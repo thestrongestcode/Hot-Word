@@ -1,3 +1,46 @@
+"""
+Hot Word — multiplayer word-bomb game (Streamlit).
+
+This revision fixes the issues found in the code audit:
+
+  GAMEPLAY BUGS
+  • Input form / "Your turn" label now only shown to the active player
+    (the orphaned .wb-waiting-label class is used again for everyone else).
+  • How to Play tab actually renders its content (HOW_TO_PLAY was unused).
+  • Ghost players: a "Leave game" action exists mid-game; the end-screen
+    Home button removes you from the room; rematches only include voters.
+  • st.balloons() fires once per game end instead of every refresh tick.
+
+  CONCURRENCY
+  • join/leave/kick/set_language now run under the room file lock
+    (via the previously-unused mutate_room helper).
+  • Stale lock files (crashed process) are detected by age and reclaimed,
+    and cleanup_rooms() also removes orphaned .lock files.
+  • check_timer only acquires the lock when the timer has actually expired,
+    and only writes the room file when something changed.
+  • submit_word rejects submissions that arrive after the fuse hit zero.
+  • cleanup_rooms() no longer deletes finished rooms with a winning
+    rematch vote pending.
+
+  COMPATIBILITY (older / managed laptops)
+  • Removed the :has() CSS selector and the postMessage/hidden-button
+    hack in the How to Play language picker (replaced with st.radio).
+  • Ship a .streamlit/config.toml with `base = "light"` so dark-mode
+    devices don't render invisible text.
+
+  NEW FEATURE
+  • "Mixed" language mode (🌍): words from English, Spanish, or French
+    all count; combo pools are merged. Available when all three word
+    files exist.
+
+  VISUAL
+  • The fuse is rebuilt: it now curves from the bomb's nozzle into the
+    gap *between* player cards (angle scales with player count), so it
+    can never overlap or touch a card or its combo badge.
+  • Combos with no matching dictionary word are filtered out at load
+    time, so an unanswerable combo can't be dealt.
+"""
+
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 import json
@@ -24,6 +67,8 @@ MIN_STARTING_TIMER = 8
 LIVES              = 3
 ROOM_EXPIRY        = 300
 REMATCH_TIMEOUT    = 15
+LOCK_STALE_SECS    = 10     # a lock older than this is from a dead process
+LOCK_ORPHAN_SECS   = 30     # cleanup removes .lock files older than this
 
 ROOM_CODE_RE = re.compile(r"^(P-)?[A-Z]{4}$")
 
@@ -131,10 +176,10 @@ FRENCH_MEDIUM_COMBOS = [
     "ENT","QUE","ION","LES","DES","AIT","EUR","ANT","OUR","DAN",
     "PAR","COM","TRA","TIO","MEN","TER","RES","CON","PRO","ATI",
     "EST","UNE","AVA","ELA","IRE","OUS","TRE","NTE","AGE","AIS",
-    "SON","NCE","USE","EAU","AIL","OIR","TRE","LLE","ATI","IER",
-    "EUR","EME","AIS","AIT","ONS","ONT","ERA","ERE","EES","EUX",
-    "AUX","CHE","CHA","CHO","CHE","ECH","GNE","IGN","TTE","RAI",
-    "RON","RAN","TIN","RIS","RIE","NTE","NTS","TES",
+    "SON","NCE","USE","EAU","AIL","OIR","LLE","IER",
+    "EME","ONS","ONT","ERA","ERE","EES","EUX",
+    "AUX","CHE","CHA","CHO","ECH","GNE","IGN","TTE","RAI",
+    "RON","RAN","TIN","RIS","RIE","NTS","TES",
 ]
 
 FRENCH_HARD_COMBOS = [
@@ -143,11 +188,28 @@ FRENCH_HARD_COMBOS = [
     "IVES","ALES","ELLES","TEUR","TRICE","AINS","AINE",
     "EAUX","ERIE","ERES","ETTE","ETTES","DANS","POUR",
     "AVEC","PLUS","TOUS","TOUT","PRES","VERS","SEUL","MAIN",
-    "MENT","ISTE","TION","SION","ANCE","ENCE",
-    "IQUE","OIRE","AIRE","IBLE","ABLE",
+    "ISTE","SION","ANCE","IBLE",
 ]
 
+def _dedupe(seq):
+    """Remove duplicates while keeping order (dict preserves insertion order)."""
+    return list(dict.fromkeys(seq))
+
+# Raw (unfiltered) pools per language code.
+RAW_COMBO_POOLS = {
+    "en":  (EASY_COMBOS, MEDIUM_COMBOS, HARD_COMBOS),
+    "es":  (SPANISH_EASY_COMBOS, SPANISH_MEDIUM_COMBOS, SPANISH_HARD_COMBOS),
+    "fr":  (FRENCH_EASY_COMBOS, FRENCH_MEDIUM_COMBOS, FRENCH_HARD_COMBOS),
+    "mix": (
+        _dedupe(EASY_COMBOS + SPANISH_EASY_COMBOS + FRENCH_EASY_COMBOS),
+        _dedupe(MEDIUM_COMBOS + SPANISH_MEDIUM_COMBOS + FRENCH_MEDIUM_COMBOS),
+        _dedupe(HARD_COMBOS + SPANISH_HARD_COMBOS + FRENCH_HARD_COMBOS),
+    ),
+}
+
 # ─── Bad words filter ─────────────────────────────────────────────────────────
+# Exact-match only (multi-word entries removed — a single submitted word can
+# never equal them, so they were dead weight).
 
 BAD_WORDS = {
     "fuck","shit","cunt","cock","dick","ass","bitch","bastard","damn","crap",
@@ -156,18 +218,13 @@ BAD_WORDS = {
     "polla","culo","gilipollas","capullo","follar","verga","pendejo","chinga",
     "chingada","cagar","cagada","maricon","maricón","mamada","mamadas",
     "chingadera","chingaderas","putada","putadas","putazo","putazos",
-    "hijoputa","hijoputas","me cago","ostia",
+    "hijoputa","hijoputas","ostia",
     "pene","ano","prostituta","zorra","perra","subnormal","retrasado",
     "imbecil","estupido","idiota","mongolo",
     "merde","putain","connard","salope","connasse","foutre","enculer","baiser",
     "chier","cul","bite","couille","couilles","couillon","nichons","nichon",
-    "bordel","branler","branleur","pédé","pede","nique","niquer","va te faire",
+    "bordel","branler","branleur","pédé","pede","nique","niquer",
 }
-
-NORMALIZED_BAD_WORDS = None
-
-def is_bad_word(word):
-    return normalize(word) in NORMALIZED_BAD_WORDS
 
 # ─── Accent normalization ─────────────────────────────────────────────────────
 
@@ -179,10 +236,13 @@ def normalize(text):
 
 NORMALIZED_BAD_WORDS = {normalize(w) for w in BAD_WORDS}
 
+def is_bad_word(word):
+    return normalize(word) in NORMALIZED_BAD_WORDS
+
 def esc(s):
     return html.escape(str(s), quote=True)
 
-# ─── Word validation ──────────────────────────────────────────────────────────
+# ─── Word loading & validation ────────────────────────────────────────────────
 
 @st.cache_resource
 def load_words():
@@ -191,7 +251,6 @@ def load_words():
     french  = set()
 
     if not os.path.exists(WORDS_FILE):
-        st.error(f"Missing required word list: {WORDS_FILE}")
         return english, spanish, french
 
     with open(WORDS_FILE, encoding="utf-8") as f:
@@ -218,76 +277,113 @@ def load_words():
 
     return english, spanish, french
 
+def _word_sets_for(language):
+    """Return the tuple of word sets a given language mode validates against."""
+    english, spanish, french = load_words()
+    if language == "es":
+        return (spanish,)
+    if language == "fr":
+        return (french,)
+    if language == "mix":
+        return (english, spanish, french)
+    return (english,)
+
+@st.cache_resource
+def get_combo_pools(language):
+    """
+    Return (easy, medium, hard) combo pools for a language, with any combo
+    that matches ZERO dictionary words removed. Runs once per language
+    (cached), so an unanswerable combo can never be dealt mid-game.
+    """
+    word_sets = _word_sets_for(language)
+    raw = RAW_COMBO_POOLS.get(language, RAW_COMBO_POOLS["en"])
+
+    def viable(combo):
+        cl = combo.lower()
+        # any() short-circuits: common combos hit a word almost instantly.
+        return any(any(cl in w for w in ws) for ws in word_sets)
+
+    return tuple([c for c in pool if viable(c)] for pool in raw)
+
+# Per-language error strings, so adding a language is one dict entry
+# instead of another if/elif chain. "mix" deliberately reuses English.
+MSGS = {
+    "en": {
+        "empty":     "Type a word first.",
+        "bad":       "That word is inappropriate. Please enter an appropriate response.",
+        "no_combo":  '"{word}" doesn\'t contain "{combo}".',
+        "invalid":   '"{word}" isn\'t a valid word.',
+        "used":      '"{word}" was already used.',
+        "not_turn":  "Not your turn.",
+        "too_late":  "Too late — the bomb already went off.",
+        "not_start": "The game hasn't started yet.",
+    },
+    "es": {
+        "empty":     "Escribe una palabra primero.",
+        "bad":       "Esa palabra es inapropiada. Por favor escribe una respuesta adecuada.",
+        "no_combo":  '"{word}" no contiene "{combo}".',
+        "invalid":   '"{word}" no es una palabra válida.',
+        "used":      '"{word}" ya fue usada.',
+        "not_turn":  "No es tu turno.",
+        "too_late":  "Demasiado tarde — la bomba ya explotó.",
+        "not_start": "La partida aún no ha empezado.",
+    },
+    "fr": {
+        "empty":     "Veuillez saisir un mot.",
+        "bad":       "Ce mot est inapproprié. Veuillez saisir une réponse adéquate.",
+        "no_combo":  '"{word}" ne contient pas "{combo}".',
+        "invalid":   '"{word}" n\'est pas un mot valide.',
+        "used":      '"{word}" a déjà été utilisé.',
+        "not_turn":  "Ce n'est pas votre tour.",
+        "too_late":  "Trop tard — la bombe a déjà explosé.",
+        "not_start": "La partie n'a pas encore commencé.",
+    },
+}
+
+def msg_for(language, key, **kw):
+    return MSGS.get(language, MSGS["en"])[key].format(**kw)
+
 def is_valid_play(word, combo, used_words, language="en"):
     w          = word.lower().strip()
     w_norm     = normalize(w)
     combo_norm = normalize(combo.lower())
 
     if not w:
-        if language == "fr":
-            return False, "Veuillez saisir un mot."
-        return False, "Type a word first." if language == "en" else "Escribe una palabra primero."
+        return False, msg_for(language, "empty")
 
     if is_bad_word(w):
-        if language == "fr":
-            return False, "Ce mot est inapproprié. Veuillez saisir une réponse adéquate."
-        return False, ("That word is inappropriate. Please enter an appropriate response."
-                       if language == "en" else
-                       "Esa palabra es inapropiada. Por favor escribe una respuesta adecuada.")
+        return False, msg_for(language, "bad")
 
     if combo_norm not in w_norm:
-        if language == "fr":
-            return False, f'"{word}" ne contient pas "{combo}".'
-        return False, (f'"{word}" doesn\'t contain "{combo}".' if language == "en"
-                       else f'"{word}" no contiene "{combo}".')
+        return False, msg_for(language, "no_combo", word=word, combo=combo)
 
-    english, spanish, french = load_words()
-
-    if language == "es":
-        valid_word = w in spanish or w_norm in spanish
-    elif language == "fr":
-        valid_word = w in french or w_norm in french
-    else:
-        valid_word = w in english
+    # A word is valid if it (or its accent-stripped form) appears in ANY of
+    # the word sets for this mode. For "mix" that's all three dictionaries —
+    # no combined file needed, just membership checks against each set.
+    valid_word = any((w in ws or w_norm in ws) for ws in _word_sets_for(language))
 
     if not valid_word:
-        if language == "fr":
-            return False, f'"{word}" n\'est pas un mot valide.'
-        return False, (f'"{word}" isn\'t a valid word.' if language == "en"
-                       else f'"{word}" no es una palabra válida.')
+        return False, msg_for(language, "invalid", word=word)
 
-    if w_norm in [normalize(u) for u in used_words]:
-        if language == "fr":
-            return False, f'"{word}" a déjà été utilisé.'
-        return False, (f'"{word}" was already used.' if language == "en"
-                       else f'"{word}" ya fue usada.')
+    # used_words are stored normalized already, so compare directly.
+    if w_norm in used_words:
+        return False, msg_for(language, "used", word=word)
 
     return True, "ok"
 
 # ─── Combo selection ──────────────────────────────────────────────────────────
 
 def pick_combo(round_num, used_combos, language="en"):
-    if language == "fr":
-        if round_num <= 5:
-            pool = FRENCH_EASY_COMBOS
-        elif round_num <= 12:
-            pool = FRENCH_EASY_COMBOS + FRENCH_MEDIUM_COMBOS
-        else:
-            pool = FRENCH_MEDIUM_COMBOS + FRENCH_HARD_COMBOS
-    elif language == "es":
-        if round_num <= 5:
-            pool = SPANISH_EASY_COMBOS
-        elif round_num <= 12:
-            pool = SPANISH_EASY_COMBOS + SPANISH_MEDIUM_COMBOS
-        else:
-            pool = SPANISH_MEDIUM_COMBOS + SPANISH_HARD_COMBOS
+    easy, medium, hard = get_combo_pools(language)
+    if round_num <= 5:
+        pool = easy
+    elif round_num <= 12:
+        pool = easy + medium
     else:
-        if round_num <= 5:
-            pool = EASY_COMBOS
-        elif round_num <= 12:
-            pool = EASY_COMBOS + MEDIUM_COMBOS
-        else:
-            pool = MEDIUM_COMBOS + HARD_COMBOS
+        pool = medium + hard
+
+    if not pool:                       # pathological word list — fail safe
+        pool = easy + medium + hard or ["ER"]
 
     available = [c for c in pool if c not in used_combos]
     if not available:
@@ -311,6 +407,15 @@ def room_file_lock(code, timeout=3.0, poll_interval=0.05):
             os.write(fd, str(os.getpid()).encode("utf-8"))
             break
         except FileExistsError:
+            # Stale-lock recovery: no legitimate operation holds the lock for
+            # more than a moment. If the lock file is old, its owner crashed —
+            # reclaim it instead of bricking the room forever.
+            try:
+                if time.time() - os.path.getmtime(lock_path) > LOCK_STALE_SECS:
+                    os.remove(lock_path)
+                    continue
+            except OSError:
+                pass
             if time.time() - start > timeout:
                 raise TimeoutError("Room is busy. Try again.")
             time.sleep(poll_interval)
@@ -325,13 +430,20 @@ def room_file_lock(code, timeout=3.0, poll_interval=0.05):
             pass
 
 def mutate_room(code, mutator):
-    with room_file_lock(code):
-        state = load_room(code)
-        if state is None:
-            return None
-        mutator(state)
-        save_room(code, state)
-        return state
+    """Load → mutate → save, atomically under the room lock.
+
+    The mutator may return False to skip saving (no change)."""
+    try:
+        with room_file_lock(code):
+            state = load_room(code)
+            if state is None:
+                return None
+            result = mutator(state)
+            if result is not False:
+                save_room(code, state)
+            return state
+    except TimeoutError:
+        return load_room(code)
 
 # ─── Room helpers ─────────────────────────────────────────────────────────────
 
@@ -364,10 +476,17 @@ def save_room(code, state):
     try:
         with open(tmp, "w") as f:
             json.dump(state, f)
-        os.replace(tmp, p)
+        os.replace(tmp, p)              # atomic on the same filesystem
     except OSError:
         with open(p, "w") as f:
             json.dump(state, f)
+
+def delete_room(code):
+    for path in (room_path(code), os.path.join(ROOMS_DIR, f"{code}.lock")):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 def create_room(code, name, private, same_device=False, player2_name=None):
     players = [{"name": name, "lives": LIVES, "alive": True}]
@@ -385,23 +504,35 @@ def create_room(code, name, private, same_device=False, player2_name=None):
         "same_device": same_device,
         "rematch_votes": [],
         "rematch_deadline": None,
-        "rematch_started": False,
     }
     save_room(code, state)
     return state
 
 def join_room(code, name):
-    state = load_room(code)
-    if state is None:         return None, "Room not found."
-    if state["started"]:      return None, "Game already started."
-    if state.get("same_device"): return None, "This is a same-device room."
-    existing_names = [p["name"].strip().casefold() for p in state["players"]]
-    if name.strip().casefold() in existing_names:
-                              return None, "Name already taken."
-    if len(state["players"]) >= 8:
-                              return None, "Room is full (max 8)."
-    state["players"].append({"name": name, "lives": LIVES, "alive": True})
-    save_room(code, state)
+    """Join under the room lock so two simultaneous joins can't erase
+    each other (the old version did load→save with no lock)."""
+    outcome = {"msg": "Room not found."}
+
+    def mutator(state):
+        if state["started"]:
+            outcome["msg"] = "Game already started."
+            return False
+        if state.get("same_device"):
+            outcome["msg"] = "This is a same-device room."
+            return False
+        existing = [p["name"].strip().casefold() for p in state["players"]]
+        if name.strip().casefold() in existing:
+            outcome["msg"] = "Name already taken."
+            return False
+        if len(state["players"]) >= 8:
+            outcome["msg"] = "Room is full (max 8)."
+            return False
+        state["players"].append({"name": name, "lives": LIVES, "alive": True})
+        outcome["msg"] = "ok"
+
+    state = mutate_room(code, mutator)
+    if state is None or outcome["msg"] != "ok":
+        return None, outcome["msg"]
     return state, "ok"
 
 def gen_code(private=False):
@@ -414,46 +545,129 @@ def gen_unique_code(private=False):
             return code
     raise RuntimeError("Could not generate a unique room code after 20 attempts.")
 
-def leave_room(code, name):
+def leave_lobby(code, name):
+    """Leave before the game starts. Host leaving closes the room."""
     state = load_room(code)
-    if state is None: return
+    if state is None:
+        return
     if state["host"] == name:
-        p = room_path(code)
-        if os.path.exists(p): os.remove(p)
-    else:
+        delete_room(code)
+        return
+
+    def mutator(state):
         state["players"] = [p for p in state["players"] if p["name"] != name]
-        save_room(code, state)
+
+    mutate_room(code, mutator)
+
+def leave_game(code, name):
+    """Leave mid-game. The player is eliminated in place (indices stay
+    stable); if it was their turn, play advances immediately."""
+    def mutator(state):
+        if state.get("finished"):
+            return False
+        idx = next((i for i, p in enumerate(state["players"]) if p["name"] == name), None)
+        if idx is None or not state["players"][idx]["alive"]:
+            return False
+
+        lang = state.get("language", "en")
+        p = state["players"][idx]
+        p["alive"] = False
+        p["lives"] = 0
+        if lang == "fr":
+            state["last_message"] = f'eliminated:{esc(name)} a quitté la partie.'
+        elif lang == "es":
+            state["last_message"] = f'eliminated:{esc(name)} abandonó la partida.'
+        else:
+            state["last_message"] = f'eliminated:{esc(name)} left the game.'
+
+        alive = alive_players(state)
+        if len(alive) <= 1:
+            state["finished"] = True
+            state["winner"] = alive[0]["name"] if alive else "Nobody"
+            return
+
+        if idx == state["current_player_idx"]:
+            _pass_turn_to_next_alive(state, lang)
+            state["timer_start"] = time.time()
+
+    mutate_room(code, mutator)
+
+def leave_finished(code, name):
+    """Leave from the end screen: actually remove the player so a rematch
+    can't include people who already went home (the old Home button left
+    them in the room as ghosts)."""
+    def mutator(state):
+        if not state.get("finished"):
+            return False
+        state["players"] = [p for p in state["players"] if p["name"] != name]
+        state["rematch_votes"] = [v for v in state.get("rematch_votes", []) if v != name]
+        if state["players"] and state.get("host") == name:
+            state["host"] = state["players"][0]["name"]
+
+    state = mutate_room(code, mutator)
+    if state is not None and not state["players"]:
+        delete_room(code)
 
 def kick_player(code, host_name, target_name):
-    state = load_room(code)
-    if state is None: return False, "Room not found."
-    if state["host"] != host_name: return False, "Only the host can kick."
-    if state.get("started"): return False, "Can't kick after game starts."
-    if target_name == host_name: return False, "Can't kick yourself."
-    state["players"] = [p for p in state["players"] if p["name"] != target_name]
-    save_room(code, state)
-    return True, "ok"
+    outcome = {"msg": "Room not found."}
+
+    def mutator(state):
+        if state["host"] != host_name:
+            outcome["msg"] = "Only the host can kick."
+            return False
+        if state.get("started"):
+            outcome["msg"] = "Can't kick after game starts."
+            return False
+        if target_name == host_name:
+            outcome["msg"] = "Can't kick yourself."
+            return False
+        state["players"] = [p for p in state["players"] if p["name"] != target_name]
+        outcome["msg"] = "ok"
+
+    state = mutate_room(code, mutator)
+    return (state is not None and outcome["msg"] == "ok"), outcome["msg"]
 
 def set_room_language(code, language):
-    state = load_room(code)
-    if state is None: return False
-    state["language"] = language
-    save_room(code, state)
-    return True
+    def mutator(state):
+        if state.get("started"):
+            return False
+        state["language"] = language
+
+    return mutate_room(code, mutator) is not None
 
 def cleanup_rooms():
-    if not os.path.exists(ROOMS_DIR): return
+    if not os.path.exists(ROOMS_DIR):
+        return
     now = time.time()
     for fname in os.listdir(ROOMS_DIR):
-        if not fname.endswith(".json"): continue
         p = os.path.join(ROOMS_DIR, fname)
+
+        # Orphaned lock files from crashed processes brick their room.
+        if fname.endswith(".lock"):
+            try:
+                if now - os.path.getmtime(p) > LOCK_ORPHAN_SECS:
+                    os.remove(p)
+            except OSError:
+                pass
+            continue
+
+        if not fname.endswith(".json"):
+            continue
         try:
             with open(p) as f:
                 s = json.load(f)
             if s.get("finished"):
                 deadline = s.get("rematch_deadline")
-                if deadline and now > deadline + 5:
-                    os.remove(p)
+                votes    = s.get("rematch_votes", [])
+                # A winning rematch vote belongs to the room's own clients —
+                # don't yank the room out from under them. Hard cap so an
+                # abandoned room still gets removed eventually.
+                rematch_pending = len(votes) >= 2 or (s.get("same_device") and len(votes) >= 1)
+                if deadline:
+                    if rematch_pending and now < deadline + 60:
+                        continue
+                    if now > deadline + 5:
+                        os.remove(p)
                 continue
             if not s.get("started") and now - s.get("created_at", now) > ROOM_EXPIRY:
                 os.remove(p); continue
@@ -464,17 +678,20 @@ def cleanup_rooms():
 
 def list_public_rooms():
     cleanup_rooms()
-    if not os.path.exists(ROOMS_DIR): return []
+    if not os.path.exists(ROOMS_DIR):
+        return []
     rooms = []
     for fname in os.listdir(ROOMS_DIR):
-        if not fname.endswith(".json"): continue
+        if not fname.endswith(".json"):
+            continue
         code = fname[:-5]
         try:
             s = load_room(code)
-            if s is None: continue
+            if s is None:
+                continue
             if not s.get("is_private") and not s.get("started") and not s.get("finished") and not s.get("same_device"):
                 rooms.append({"code": code, "host": s["host"],
-                               "players": len(s["players"]), "created_at": s.get("created_at", 0)})
+                              "players": len(s["players"]), "created_at": s.get("created_at", 0)})
         except Exception:
             continue
     return sorted(rooms, key=lambda r: r["created_at"], reverse=True)
@@ -482,19 +699,16 @@ def list_public_rooms():
 # ─── Rematch helpers ──────────────────────────────────────────────────────────
 
 def cast_rematch_vote(code, name):
-    try:
-        with room_file_lock(code):
-            state = load_room(code)
-            if state is None or not state.get("finished"):
-                return state
-            votes = state.get("rematch_votes", [])
-            if name not in votes:
-                votes.append(name)
-                state["rematch_votes"] = votes
-            save_room(code, state)
-            return state
-    except TimeoutError:
-        return load_room(code)
+    def mutator(state):
+        if not state.get("finished"):
+            return False
+        votes = state.get("rematch_votes", [])
+        if name in votes:
+            return False
+        votes.append(name)
+        state["rematch_votes"] = votes
+
+    return mutate_room(code, mutator)
 
 def check_rematch_or_expire(code):
     try:
@@ -515,7 +729,7 @@ def check_rematch_or_expire(code):
                 save_room(code, state)
                 return state
 
-            all_voted    = len(votes) == total
+            all_voted    = total > 0 and len(votes) == total
             enough_voted = len(votes) >= 2
             time_up      = now >= deadline
 
@@ -529,20 +743,27 @@ def check_rematch_or_expire(code):
                     _reset_for_rematch(state)
                     save_room(code, state)
                     return state
-                p = room_path(code)
-                if os.path.exists(p):
-                    os.remove(p)
+                delete_room(code)
                 return None
 
-            save_room(code, state)
             return state
     except TimeoutError:
         return load_room(code)
 
 def _reset_for_rematch(state):
+    # Only voters play the rematch — anyone who didn't vote (closed tab,
+    # clicked Home, walked away) would otherwise sit in the circle burning
+    # three full timeouts as a ghost.
+    voters = set(state.get("rematch_votes", []))
+    if not state.get("same_device") and voters:
+        state["players"] = [p for p in state["players"] if p["name"] in voters]
+        if state["players"] and state.get("host") not in voters:
+            state["host"] = state["players"][0]["name"]
+
     for p in state["players"]:
         p["lives"] = LIVES
         p["alive"] = True
+
     lang  = state.get("language", "en")
     combo = pick_combo(1, [], lang)
     state.update(
@@ -559,7 +780,6 @@ def _reset_for_rematch(state):
         last_message="",
         rematch_votes=[],
         rematch_deadline=None,
-        rematch_started=True,
     )
 
 # ─── Game logic ───────────────────────────────────────────────────────────────
@@ -580,33 +800,40 @@ def start_game(code, state):
     )
     save_room(code, state)
 
-def advance_turn_state(state, remaining_time):
-    alive = alive_players(state)
-    if len(alive) <= 1:
-        return
-    cur_name    = state["players"][state["current_player_idx"]]["name"]
-    alive_names = [p["name"] for p in alive]
-    cur_idx     = alive_names.index(cur_name) if cur_name in alive_names else 0
-    next_name   = alive_names[(cur_idx + 1) % len(alive_names)]
-    for i, p in enumerate(state["players"]):
-        if p["name"] == next_name:
-            state["current_player_idx"] = i
+def _pass_turn_to_next_alive(state, lang):
+    """Move current_player_idx to the next alive player and deal a combo."""
+    n_all = len(state["players"])
+    cur   = state["current_player_idx"]
+    for offset in range(1, n_all + 1):
+        cand = (cur + offset) % n_all
+        if state["players"][cand]["alive"]:
+            state["current_player_idx"] = cand
             break
-    guaranteed = max(remaining_time, MIN_TURN_FLOOR)
-    state["timer_start"] = time.time() - (state["timer_duration"] - guaranteed)
-    lang  = state.get("language", "en")
     combo = pick_combo(state["round"], state["used_combos"], lang)
     state["current_combo"] = combo
     state["used_combos"].append(combo)
     state["round"] += 1
 
+def advance_turn_state(state, remaining_time):
+    alive = alive_players(state)
+    if len(alive) <= 1:
+        return
+    lang = state.get("language", "en")
+    _pass_turn_to_next_alive(state, lang)
+    # The bomb carries over: the next player inherits whatever time was
+    # left, never less than the floor.
+    guaranteed = max(remaining_time, MIN_TURN_FLOOR)
+    state["timer_start"] = time.time() - (state["timer_duration"] - guaranteed)
+
 def check_timer_state(state):
+    """Apply a timeout if the fuse has run out. Returns True if the state
+    changed (so callers can skip the disk write when nothing happened)."""
     if not state["started"] or state["finished"]:
-        return state
+        return False
 
     elapsed = time.time() - state["timer_start"]
     if elapsed < state["timer_duration"]:
-        return state
+        return False
 
     lang  = state.get("language", "en")
     is_es = lang == "es"
@@ -645,29 +872,29 @@ def check_timer_state(state):
         state["finished"] = True
         state["winner"]   = "Personne" if is_fr else ("Nadie" if is_es else "Nobody")
     else:
-        n_all          = len(state["players"])
-        cur_global_idx = state["current_player_idx"]
-        for offset in range(1, n_all + 1):
-            candidate_idx = (cur_global_idx + offset) % n_all
-            if state["players"][candidate_idx]["alive"]:
-                state["current_player_idx"] = candidate_idx
-                break
-        combo = pick_combo(state["round"], state["used_combos"], lang)
-        state["current_combo"] = combo
-        state["used_combos"].append(combo)
-        state["round"] += 1
+        _pass_turn_to_next_alive(state, lang)
 
     state["timer_start"] = time.time()
-    return state
+    return True
 
 def check_timer(code, state=None):
+    """Cheap path first: if the in-memory copy says the fuse hasn't run out,
+    don't touch the lock or the disk at all. With 8 clients polling every
+    second, the old version produced 8 lock+write cycles/sec and caused
+    'Room is busy' errors on real submits."""
+    if state is not None:
+        if not state.get("started") or state.get("finished"):
+            return state
+        if state.get("timer_start") and time.time() - state["timer_start"] < state["timer_duration"]:
+            return state
+
     try:
         with room_file_lock(code):
             fresh_state = load_room(code)
             if fresh_state is None:
                 return state
-            check_timer_state(fresh_state)
-            save_room(code, fresh_state)
+            if check_timer_state(fresh_state):
+                save_room(code, fresh_state)
             return fresh_state
     except TimeoutError:
         return state if state is not None else load_room(code)
@@ -678,24 +905,33 @@ def submit_word(code, state, name, word):
             fresh_state = load_room(code)
             if fresh_state is None:
                 return state, "Room not found."
+
+            lang = fresh_state.get("language", "en")
+
+            if not fresh_state.get("started"):
+                return fresh_state, msg_for(lang, "not_start")
             if fresh_state.get("finished"):
                 return fresh_state, "Game already finished."
 
             cp = fresh_state["players"][fresh_state["current_player_idx"]]
             if cp["name"] != name:
-                lang = fresh_state.get("language", "en")
-                if lang == "fr":
-                    return fresh_state, "Ce n'est pas votre tour."
-                return fresh_state, ("No es tu turno." if lang == "es" else "Not your turn.")
+                return fresh_state, msg_for(lang, "not_turn")
 
-            lang = fresh_state.get("language", "en")
+            elapsed   = time.time() - fresh_state["timer_start"]
+            remaining = fresh_state["timer_duration"] - elapsed
+
+            # Polling is 1s, so a client could submit up to ~1s after zero
+            # before anyone's check_timer fires. Don't accept it — apply the
+            # timeout right here under the same lock.
+            if remaining <= 0:
+                if check_timer_state(fresh_state):
+                    save_room(code, fresh_state)
+                return fresh_state, msg_for(lang, "too_late")
+
             valid, msg = is_valid_play(word, fresh_state["current_combo"],
                                        fresh_state["used_words"], lang)
             if not valid:
                 return fresh_state, msg
-
-            elapsed   = time.time() - fresh_state["timer_start"]
-            remaining = max(0, fresh_state["timer_duration"] - elapsed)
 
             fresh_state["used_words"].append(normalize(word.lower()))
 
@@ -715,6 +951,8 @@ def submit_word(code, state, name, word):
 
 
 # ─── CSS ─────────────────────────────────────────────────────────────────────
+# Note: no :has() selectors anywhere — they need Chrome/Edge 105+ and broke
+# on older managed laptops. Theme is pinned light via .streamlit/config.toml.
 
 def inject_css():
     st.markdown("""
@@ -822,6 +1060,7 @@ h1, h2, h3 { font-family: 'DM Serif Display', serif !important; color: var(--ink
     font-weight: 500 !important;
 }
 
+.stRadio label, .stRadio div { font-family: 'DM Sans', sans-serif !important; }
 .stAlert { border-radius: 6px !important; font-family: 'DM Sans', sans-serif !important; }
 .stCheckbox label { font-family: 'DM Sans', sans-serif !important; color: var(--ink) !important; }
 hr { border-color: var(--border) !important; }
@@ -983,6 +1222,14 @@ hr { border-color: var(--border) !important; }
 }
 .wb-how-heart { color: #c0392b; font-size: 0.9rem; }
 .wb-how-divider { border: none; border-top: 1px solid var(--border); margin: 1.1rem 0; }
+.wb-how-section-title {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 0.7rem;
+}
 
 /* Same-device badge */
 .wb-same-device-badge {
@@ -1073,7 +1320,7 @@ HOW_TO_PLAY = {
             ("04", "Play passes to the next person. The timer gets a little shorter each round, so the pressure builds the longer the game goes."),
         ],
         "winning_title": "WINNING",
-        "winning_text": "Last player with at least one life remaining wins. Good luck — and think fast.",
+        "winning_text": "Last player with at least one life remaining wins. Good luck — and think fast. In 🌍 Mixed mode, words from English, Spanish, or French all count.",
     },
     "es": {
         "basics_title": "LO BÁSICO",
@@ -1086,7 +1333,7 @@ HOW_TO_PLAY = {
             ("04", "El turno pasa a la siguiente persona. El temporizador se acorta un poco cada ronda, así que la presión aumenta cuanto más dura el juego."),
         ],
         "winning_title": "CÓMO GANAR",
-        "winning_text": "Gana el último jugador con al menos una vida. Buena suerte — y piensa rápido.",
+        "winning_text": "Gana el último jugador con al menos una vida. Buena suerte — y piensa rápido. En el modo 🌍 Mixto, cuentan palabras en inglés, español o francés.",
     },
     "fr": {
         "basics_title": "LES BASES",
@@ -1094,134 +1341,53 @@ HOW_TO_PLAY = {
         "round_title": "COMMENT SE DÉROULE UN TOUR",
         "rules": [
             ("01", 'Une combinaison s\'allume sur la bombe — par exemple <span class="wb-how-combo-demo">STR</span>. C\'est votre tour de la désamorcer.'),
-            ("02", 'Tapez n\'importe quel mot français valide contenant ces lettres dans l\'ordre. <span class="wb-how-combo-word">street</span>, <span class="wb-how-combo-word">structure</span> et <span class="wb-how-combo-word">construire</span> fonctionneraient. Les mots inventés et les mots déjà utilisés ne comptent pas.'),
+            ("02", 'Tapez n\'importe quel mot français valide contenant ces lettres dans l\'ordre. <span class="wb-how-combo-word">structure</span> et <span class="wb-how-combo-word">construire</span> fonctionneraient. Les mots inventés et les mots déjà utilisés ne comptent pas.'),
             ("03", 'Soumettez avant que le temps ne soit écoulé. Sinon, vous perdez une vie <span class="wb-how-heart">♥</span>. Perdez les trois et vous êtes éliminé.'),
             ("04", "Le tour passe à la personne suivante. Le minuteur raccourcit un peu à chaque tour, donc la pression monte au fil du jeu."),
         ],
         "winning_title": "COMMENT GAGNER",
-        "winning_text": "Le dernier joueur avec au moins une vie restante gagne. Bonne chance — et pensez vite.",
+        "winning_text": "Le dernier joueur avec au moins une vie restante gagne. Bonne chance — et pensez vite. En mode 🌍 Mixte, les mots anglais, espagnols ou français comptent tous.",
     },
 }
 
-# ─── How to Play renderer (fixed — no double-render trick) ───────────────────
+HOW_LANG_LABELS = {"en": "🇺🇸 English", "es": "🇪🇸 Español", "fr": "🇫🇷 Français"}
 
 def render_how_to_play(spanish_available, french_available):
-    if "how_lang" not in st.session_state:
-        st.session_state.how_lang = "en"
+    """Plain st.radio language picker (the old postMessage / hidden-button /
+    :has() machinery broke on older browsers) + the actual rules content,
+    which the previous version built but never rendered."""
+    langs = ["en"]
+    if spanish_available:
+        langs.append("es")
+    if french_available:
+        langs.append("fr")
 
-    lang_options = [
-        ("en", "En", True),
-        ("es", "Es", spanish_available),
-        ("fr", "Fr", french_available),
-    ]
-    current = st.session_state.how_lang
+    chosen = st.radio(
+        "Rules language",
+        options=langs,
+        horizontal=True,
+        key="how_lang",
+        format_func=lambda x: HOW_LANG_LABELS[x],
+        label_visibility="collapsed",
+    )
 
-    col_langs, col_content = st.columns([1, 5])
-
-    with col_langs:
-        for lang_code, short, available in lang_options:
-            is_active = current == lang_code
-
-            if available:
-                if is_active:
-                    bg     = "#0f0f0f"
-                    color  = "#faf9f6"
-                    border = "2px solid #0f0f0f"
-                    fw     = "600"
-                    hover  = "#333333"
-                else:
-                    bg     = "#ffffff"
-                    color  = "#0f0f0f"
-                    border = "1.5px solid #d0cdc6"
-                    fw     = "500"
-                    hover  = "#f3f1ec"
-
-                # Inject style targeting this specific button by its key.
-                # Streamlit sets data-testid on the container; we use the
-                # key attribute on the button element itself.
-                st.markdown(f"""
-                <style>
-                [data-testid="stButton"]:has(button[kind="secondary"][aria-label="{short}"]) button,
-                button[data-testid="baseButton-secondary"][aria-label="{short}"] {{
-                    background:     {bg}     !important;
-                    color:          {color}  !important;
-                    border:         {border} !important;
-                    font-family:    'DM Mono', monospace !important;
-                    font-size:      13px     !important;
-                    font-weight:    {fw}     !important;
-                    letter-spacing: 0.06em   !important;
-                    padding:        8px 10px !important;
-                    border-radius:  6px      !important;
-                    width:          100%     !important;
-                    margin-bottom:  6px      !important;
-                    box-shadow:     none     !important;
-                    transition:     all 0.12s !important;
-                }}
-                [data-testid="stButton"]:has(button[kind="secondary"][aria-label="{short}"]) button:hover {{
-                    background: {hover} !important;
-                    opacity: 1 !important;
-                }}
-                </style>
-                """, unsafe_allow_html=True)
-
-                if st.button(short, key=f"how_lang_btn_{lang_code}", use_container_width=True):
-                    st.session_state.how_lang = lang_code
-                    st.rerun()
-
-            else:
-                # Static non-clickable pill for unavailable languages
-                st.markdown(
-                    f"<div style='"
-                    f"padding:8px 10px;"
-                    f"border-radius:6px;"
-                    f"border:1.5px solid #e0ddd6;"
-                    f"background:#fff;"
-                    f"font-family:DM Mono,monospace;"
-                    f"font-size:13px;"
-                    f"font-weight:500;"
-                    f"letter-spacing:0.06em;"
-                    f"color:#ccc;"
-                    f"text-align:center;"
-                    f"margin-bottom:6px;"
-                    f"cursor:not-allowed;"
-                    f"'>{short}</div>",
-                    unsafe_allow_html=True
-                )
-
-    with col_content:
-        hl = current
-        if hl == "es" and not spanish_available:
-            hl = "en"
-        if hl == "fr" and not french_available:
-            hl = "en"
-
-        c = HOW_TO_PLAY[hl]
-
-        if (current == "es" and not spanish_available) or (current == "fr" and not french_available):
-            lang_name = "Spanish" if current == "es" else "French"
-            st.markdown(
-                f"<div class='wb-msg wb-msg-bad' style='margin-bottom:1rem;'>"
-                f"⚠️ {lang_name} word list not available — showing English.</div>",
-                unsafe_allow_html=True
-            )
-
-        rules_html = "".join(
-            f'''<div class="wb-how-rule">
-  <span class="wb-how-rule-num">{num}</span>
-  <span class="wb-how-rule-text">{text}</span>
-</div>'''
-            for num, text in c["rules"]
-        )
-
-        st.markdown(f"""
+    c = HOW_TO_PLAY.get(chosen, HOW_TO_PLAY["en"])
+    rules_html = "".join(
+        f'<div class="wb-how-rule">'
+        f'<div class="wb-how-rule-num">{num}</div>'
+        f'<div class="wb-how-rule-text">{text}</div>'
+        f'</div>'
+        for num, text in c["rules"]
+    )
+    st.markdown(f"""
 <div class="wb-how-card">
-  <div class="wb-section-label">{c["basics_title"]}</div>
+  <div class="wb-how-section-title">{c["basics_title"]}</div>
   <p>{c["basics_text"]}</p>
   <hr class="wb-how-divider">
-  <div class="wb-section-label">{c["round_title"]}</div>
+  <div class="wb-how-section-title">{c["round_title"]}</div>
   {rules_html}
   <hr class="wb-how-divider">
-  <div class="wb-section-label">{c["winning_title"]}</div>
+  <div class="wb-how-section-title">{c["winning_title"]}</div>
   <p>{c["winning_text"]}</p>
 </div>
 """, unsafe_allow_html=True)
@@ -1243,6 +1409,7 @@ def render_circle(state, my_name):
     elif pct > 0.25: tcol = "#e8a020"
     else:            tcol = "#c0392b"
 
+    # Scale radius and canvas height based on player count to avoid scrolling
     if n <= 2:
         R  = 140
         CH = 460
@@ -1280,18 +1447,31 @@ def render_circle(state, my_name):
 
     combo = state.get("current_combo", "??")
 
-    P0 = (CX,       CY - 70)
-    P1 = (CX + 18,  CY - 88)
-    P2 = (CX + 65,  CY - 118)
-    P3 = (CX + 72,  CY - 158)
-    P4 = (CX + 78,  CY - 192)
-    P5 = (CX + 54,  CY - 224)
-    P6 = (CX + 22,  CY - 244)
+    # ── Fuse geometry ─────────────────────────────────────────────────────
+    # Player cards sit on the ring at angles -90° + k·(360/n). The old fuse
+    # arced straight up from the bomb — directly into player #1's card.
+    # The new fuse curves from the nozzle toward the ANGULAR MIDPOINT
+    # between the top card and its clockwise neighbor (-90° + 180/n), which
+    # is by construction the direction farthest from any card. Its tip stops
+    # at radius 115 — for every supported layout (n=2..8) that leaves
+    # comfortable clearance from every card rectangle and combo badge.
+    start_a = -math.pi / 2                       # nozzle points straight up
+    gap_a   = -math.pi / 2 + math.pi / n         # mid-gap between two cards
+
+    def polar(r, a):
+        return (CX + r * math.cos(a), CY + r * math.sin(a))
+
+    def swing(t):                                # interpolate the bend
+        return start_a + (gap_a - start_a) * t
+
+    P0 = polar(70,  start_a)                     # base, at the nozzle tip
+    P1 = polar(82,  swing(0.35))
+    P2 = polar(100, swing(0.75))
+    P3 = polar(115, gap_a)                       # fuse tip
 
     fuse_path = (
-        f"M{P0[0]},{P0[1]} "
-        f"C{P1[0]},{P1[1]} {P2[0]},{P2[1]} {P3[0]},{P3[1]} "
-        f"C{P4[0]},{P4[1]} {P5[0]},{P5[1]} {P6[0]},{P6[1]}"
+        f"M{P0[0]:.1f},{P0[1]:.1f} "
+        f"C{P1[0]:.1f},{P1[1]:.1f} {P2[0]:.1f},{P2[1]:.1f} {P3[0]:.1f},{P3[1]:.1f}"
     )
 
     def bezier_point(t, p0, p1, p2, p3):
@@ -1300,52 +1480,31 @@ def render_circle(state, my_name):
         y = u**3*p0[1] + 3*u**2*t*p1[1] + 3*u*t**2*p2[1] + t**3*p3[1]
         return (x, y)
 
-    def approx_bezier_length(p0, p1, p2, p3, steps=40):
-        pts = [bezier_point(i / steps, p0, p1, p2, p3) for i in range(steps + 1)]
-        return sum(math.hypot(pts[i+1][0]-pts[i][0], pts[i+1][1]-pts[i][1]) for i in range(steps))
+    # Arc-length table for the single cubic (the old two-segment version
+    # with the repeated lookup loops is gone).
+    STEPS = 64
+    pts = [bezier_point(i / STEPS, P0, P1, P2, P3) for i in range(STEPS + 1)]
+    cum = [0.0]
+    for i in range(STEPS):
+        cum.append(cum[-1] + math.hypot(pts[i+1][0] - pts[i][0],
+                                        pts[i+1][1] - pts[i][1]))
+    FUSE_L = cum[-1] or 1.0
 
-    seg1_len = approx_bezier_length(P0, P1, P2, P3)
-    seg2_len = approx_bezier_length(P3, P4, P5, P6)
-    FUSE_L   = seg1_len + seg2_len
+    def point_at_length(d):
+        d = max(0.0, min(FUSE_L, d))
+        for i in range(STEPS):
+            if cum[i+1] >= d:
+                seg = cum[i+1] - cum[i]
+                frac = (d - cum[i]) / seg if seg > 0 else 0
+                return (pts[i][0] + (pts[i+1][0] - pts[i][0]) * frac,
+                        pts[i][1] + (pts[i+1][1] - pts[i][1]) * frac)
+        return pts[-1]
 
     fuse_dashoffset = FUSE_L * (1.0 - pct)
     fuse_delta = (FUSE_L / state["timer_duration"]) if state["timer_duration"] else 0
     fuse_next  = min(FUSE_L, fuse_dashoffset + fuse_delta)
 
-    lit_dist = FUSE_L * pct
-
-    if lit_dist <= seg1_len:
-        t_approx = lit_dist / seg1_len if seg1_len > 0 else 0
-        for _ in range(4):
-            steps = 40
-            pts = [bezier_point(j / steps, P0, P1, P2, P3) for j in range(steps + 1)]
-            cum = [0.0]
-            for j in range(steps):
-                cum.append(cum[-1] + math.hypot(pts[j+1][0]-pts[j][0], pts[j+1][1]-pts[j][1]))
-            target = lit_dist
-            for j in range(steps):
-                if cum[j+1] >= target:
-                    frac = (target - cum[j]) / (cum[j+1] - cum[j] + 1e-9)
-                    t_approx = (j + frac) / steps
-                    break
-        sx, sy = bezier_point(t_approx, P0, P1, P2, P3)
-    else:
-        dist_into_seg2 = lit_dist - seg1_len
-        t_approx = dist_into_seg2 / seg2_len if seg2_len > 0 else 0
-        steps = 40
-        pts = [bezier_point(j / steps, P3, P4, P5, P6) for j in range(steps + 1)]
-        cum = [0.0]
-        for j in range(steps):
-            cum.append(cum[-1] + math.hypot(pts[j+1][0]-pts[j][0], pts[j+1][1]-pts[j][1]))
-        target = dist_into_seg2
-        for j in range(steps):
-            if cum[j+1] >= target:
-                frac = (target - cum[j]) / (cum[j+1] - cum[j] + 1e-9)
-                t_approx = (j + frac) / steps
-                break
-        sx, sy = bezier_point(t_approx, P3, P4, P5, P6)
-
-    spark_x, spark_y = sx, sy
+    spark_x, spark_y = point_at_length(FUSE_L * pct)
 
     if pct > 0.5:
         spark_core  = "#ffe066"
@@ -1520,12 +1679,12 @@ def render_circle(state, my_name):
               d="{fuse_path}"
               fill="none"
               stroke="#8b6914" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"
-              stroke-dasharray="{FUSE_L} {FUSE_L}"
+              stroke-dasharray="{FUSE_L:.2f} {FUSE_L:.2f}"
               stroke-dashoffset="{fuse_dashoffset:.2f}"/>
         <path d="{fuse_path}"
               fill="none"
               stroke="#c49a2a" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"
-              stroke-dasharray="{FUSE_L} {FUSE_L}"
+              stroke-dasharray="{FUSE_L:.2f} {FUSE_L:.2f}"
               stroke-dashoffset="{fuse_dashoffset:.2f}"
               opacity="0.5"/>
         {spark_svg}
@@ -1556,13 +1715,28 @@ def render_circle(state, my_name):
          style="display:block;max-width:{CW}px;margin:0 auto;">
         {arrow_svg}
         {orbit_svg}
-        {cards_svg}
         {bomb_svg}
+        {cards_svg}
     </svg>
     </div>
     <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500&display=swap" rel="stylesheet">
     """
     st.components.v1.html(full_html, height=CH)
+
+
+# ─── Session helpers ──────────────────────────────────────────────────────────
+
+def go_home():
+    """Reset all per-room session state in one place."""
+    st.session_state.screen        = "home"
+    st.session_state.room_code     = None
+    st.session_state.voted_rematch = False
+    st.session_state.celebrated    = False
+    st.session_state.last_error    = ""
+    # Keyed widgets persist across rooms; without this, a host who played a
+    # French game and then created a new room would silently carry French
+    # into the new room on first render.
+    st.session_state.pop("lang_radio", None)
 
 
 # ─── App ──────────────────────────────────────────────────────────────────────
@@ -1573,16 +1747,16 @@ inject_css()
 for key, default in [
     ("screen", "home"), ("room_code", None),
     ("player_name", None), ("form_key", 0), ("last_error", ""),
-    ("voted_rematch", False), ("how_lang", "en"),
-    ("balloons_shown_for", None),   # tracks which game-finish we already ballooned
+    ("voted_rematch", False), ("celebrated", False),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
 
 spanish_available = os.path.exists(SPANISH_WORDS_FILE)
 french_available  = os.path.exists(FRENCH_WORDS_FILE)
-
 english_available = os.path.exists(WORDS_FILE)
+mixed_available   = english_available and spanish_available and french_available
+
 if not english_available:
     st.error(f"Missing required word list: {WORDS_FILE}. The game cannot run without it.")
     st.stop()
@@ -1592,29 +1766,36 @@ if spanish_available:
     LANG_OPTIONS.append("es")
 if french_available:
     LANG_OPTIONS.append("fr")
+if mixed_available:
+    LANG_OPTIONS.append("mix")
 
 LANG_LABELS = {
-    "en": ("🇺🇸", "English"),
-    "es": ("🇪🇸", "Español"),
-    "fr": ("🇫🇷", "Français"),
+    "en":  ("🇺🇸", "English"),
+    "es":  ("🇪🇸", "Español"),
+    "fr":  ("🇫🇷", "Français"),
+    "mix": ("🌍", "Mixed"),
 }
 
 LANG_HINTS = {
-    "en": "Combos and validation are in English.",
-    "es": "Los combos y la validación son en español.",
-    "fr": "Les combinaisons et la validation sont en français.",
+    "en":  "Combos and validation are in English.",
+    "es":  "Los combos y la validación son en español.",
+    "fr":  "Les combinaisons et la validation sont en français.",
+    "mix": "Combos from all three languages — answer in English, Spanish, or French.",
 }
 
 LANG_FORMAT = {
-    "en": "🇺🇸  English",
-    "es": "🇪🇸  Español",
-    "fr": "🇫🇷  Français",
+    "en":  "🇺🇸  English",
+    "es":  "🇪🇸  Español",
+    "fr":  "🇫🇷  Français",
+    "mix": "🌍  Mixed (En + Es + Fr)",
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HOME
 # ══════════════════════════════════════════════════════════════════════════════
 if st.session_state.screen == "home":
+
+    st.session_state.celebrated = False
 
     st.markdown("<div class='wb-title'>Hot Word</div>", unsafe_allow_html=True)
     st.markdown("<div class='wb-subtitle'>Type a word containing the combo before the bomb goes off.</div>", unsafe_allow_html=True)
@@ -1656,6 +1837,7 @@ if st.session_state.screen == "home":
                             st.session_state.room_code   = r["code"]
                             st.session_state.player_name = name.strip()
                             st.session_state.screen      = "lobby"
+                            st.session_state.pop("lang_radio", None)
                             st.rerun()
                         else:
                             st.error(msg)
@@ -1681,6 +1863,7 @@ if st.session_state.screen == "home":
                     st.session_state.room_code   = c
                     st.session_state.player_name = n
                     st.session_state.screen      = "lobby"
+                    st.session_state.pop("lang_radio", None)
                     st.rerun()
                 else:
                     st.error(msg)
@@ -1688,8 +1871,6 @@ if st.session_state.screen == "home":
     with tab3:
         if "create_same_device" not in st.session_state:
             st.session_state.create_same_device = False
-        if "create_p2_name" not in st.session_state:
-            st.session_state.create_p2_name = ""
 
         with st.form("create_room_form"):
             private     = st.checkbox("Private room")
@@ -1710,12 +1891,14 @@ if st.session_state.screen == "home":
             else:
                 code = gen_unique_code(private)
                 create_room(code, n, private, same_device=False)
-                st.session_state.room_code        = code
-                st.session_state.player_name      = n
-                st.session_state.screen           = "lobby"
+                st.session_state.room_code          = code
+                st.session_state.player_name        = n
+                st.session_state.screen             = "lobby"
                 st.session_state.create_same_device = False
+                st.session_state.pop("lang_radio", None)
                 st.rerun()
 
+        # ── Same-device P2 name prompt ────────────────────────────────────────
         if st.session_state.create_same_device:
             st.markdown("<hr>", unsafe_allow_html=True)
             st.markdown(
@@ -1747,12 +1930,13 @@ if st.session_state.screen == "home":
                 elif p2.casefold() == p1.casefold():
                     st.error("Player 2 must have a different name.")
                 else:
-                    code = gen_unique_code(private=True)
+                    code = gen_unique_code(private=True)  # same-device rooms are always private
                     create_room(code, p1, priv, same_device=True, player2_name=p2)
                     st.session_state.room_code          = code
                     st.session_state.player_name        = p1
                     st.session_state.screen             = "lobby"
                     st.session_state.create_same_device = False
+                    st.session_state.pop("lang_radio", None)
                     st.rerun()
 
     with tab4:
@@ -1765,10 +1949,10 @@ if st.session_state.screen == "home":
 # ══════════════════════════════════════════════════════════════════════════════
 elif st.session_state.screen == "lobby":
     if not st.session_state.get("room_code"):
-        st.session_state.screen = "home"; st.rerun(); st.stop()
+        go_home(); st.rerun(); st.stop()
     state = load_room(st.session_state.room_code)
     if state is None:
-        st.session_state.screen = "home"; st.rerun(); st.stop()
+        go_home(); st.rerun(); st.stop()
     if state.get("started"):
         st.session_state.screen = "game"; st.rerun(); st.stop()
 
@@ -1778,8 +1962,7 @@ elif st.session_state.screen == "lobby":
     my_names = [p["name"] for p in state["players"]]
     if st.session_state.player_name not in my_names:
         st.warning("You were removed from the room.")
-        st.session_state.screen    = "home"
-        st.session_state.room_code = None
+        go_home()
         st.rerun(); st.stop()
 
     is_host      = st.session_state.player_name == state["host"]
@@ -1816,11 +1999,9 @@ elif st.session_state.screen == "lobby":
         st.markdown(f"<div style='color:#888;font-size:0.82rem;margin-bottom:1.2rem;'>{share_hint}</div>",
                     unsafe_allow_html=True)
 
+    # Language selector — host only
     if is_host:
-        if current_lang == "es" and not spanish_available:
-            set_room_language(code, "en")
-            current_lang = "en"
-        if current_lang == "fr" and not french_available:
+        if current_lang not in LANG_OPTIONS:
             set_room_language(code, "en")
             current_lang = "en"
 
@@ -1889,9 +2070,8 @@ elif st.session_state.screen == "lobby":
         else:
             leave_label = "Leave"
         if st.button(leave_label):
-            leave_room(code, st.session_state.player_name)
-            st.session_state.screen    = "home"
-            st.session_state.room_code = None
+            leave_lobby(code, st.session_state.player_name)
+            go_home()
             st.rerun(); st.stop()
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1915,8 +2095,9 @@ elif st.session_state.screen == "lobby":
                     start_label = "Start game →"
                 if st.button(start_label):
                     state = load_room(code)
-                    start_game(code, state)
-                    st.session_state.screen = "game"
+                    if state is not None:
+                        start_game(code, state)
+                        st.session_state.screen = "game"
                     st.rerun()
         else:
             if is_fr:
@@ -1936,18 +2117,27 @@ elif st.session_state.screen == "lobby":
 # ══════════════════════════════════════════════════════════════════════════════
 elif st.session_state.screen == "game":
     if not st.session_state.get("room_code"):
-        st.session_state.screen = "home"; st.rerun(); st.stop()
+        go_home(); st.rerun(); st.stop()
     state = load_room(st.session_state.room_code)
     if state is None:
         st.error("Room lost.")
-        st.session_state.screen = "home"; st.rerun()
+        go_home(); st.rerun(); st.stop()
 
     state       = check_timer(st.session_state.room_code, state)
+    if state is None:
+        go_home(); st.rerun(); st.stop()
+
     my_name     = st.session_state.player_name
     lang        = state.get("language", "en")
     is_es       = lang == "es"
     is_fr       = lang == "fr"
     same_device = state.get("same_device", False)
+
+    # If a rematch started without us (we didn't vote), we're no longer in
+    # the room — bounce home instead of rendering someone else's game.
+    if not same_device and my_name not in [p["name"] for p in state["players"]]:
+        st.info("The next round started without you.")
+        go_home(); st.rerun(); st.stop()
 
     # ── END SCREEN ─────────────────────────────────────────────────────────────
     if state["finished"]:
@@ -1955,23 +2145,19 @@ elif st.session_state.screen == "game":
         state = check_rematch_or_expire(code)
 
         if state is None:
-            st.session_state.screen        = "home"
-            st.session_state.room_code     = None
-            st.session_state.voted_rematch = False
-            st.session_state.balloons_shown_for = None
+            go_home()
             st.rerun(); st.stop()
 
         if not state["finished"]:
-            st.session_state.voted_rematch      = False
-            st.session_state.balloons_shown_for = None
+            st.session_state.voted_rematch = False
+            st.session_state.celebrated    = False
             st.rerun(); st.stop()
 
-        # ── One-shot balloons: only fire once per unique game finish ───────────
-        # Use the room code + winner name as a unique key for this finish event.
-        finish_key = f"{code}:{state.get('winner', '')}"
-        if st.session_state.balloons_shown_for != finish_key:
+        # Balloons exactly once per game end — the old version fired them on
+        # every 1-second autorefresh tick.
+        if not st.session_state.celebrated:
             st.balloons()
-            st.session_state.balloons_shown_for = finish_key
+            st.session_state.celebrated = True
 
         if is_fr:
             winner_label = "gagne."
@@ -2044,7 +2230,7 @@ elif st.session_state.screen == "game":
 """, unsafe_allow_html=True)
 
         if same_device:
-            already = my_name in votes or st.session_state.voted_rematch
+            already = st.session_state.voted_rematch or len(votes) > 0
             if already:
                 st.markdown(f"<p style='color:#1a7a3f;font-size:0.88rem;text-align:center;'>✓ {already_voted}</p>",
                             unsafe_allow_html=True)
@@ -2061,10 +2247,8 @@ elif st.session_state.screen == "game":
                 with col_h:
                     st.markdown("<div class='btn-ghost'>", unsafe_allow_html=True)
                     if st.button(home_btn, key="end_home_btn"):
-                        st.session_state.screen             = "home"
-                        st.session_state.room_code          = None
-                        st.session_state.voted_rematch      = False
-                        st.session_state.balloons_shown_for = None
+                        delete_room(code)        # same-device: room dies with the screen
+                        go_home()
                         st.rerun()
                     st.markdown("</div>", unsafe_allow_html=True)
         else:
@@ -2101,10 +2285,10 @@ elif st.session_state.screen == "game":
             with col_home:
                 st.markdown("<div class='btn-ghost'>", unsafe_allow_html=True)
                 if st.button(home_btn, key="end_home_btn"):
-                    st.session_state.screen             = "home"
-                    st.session_state.room_code          = None
-                    st.session_state.voted_rematch      = False
-                    st.session_state.balloons_shown_for = None
+                    # Actually leave the room, so a later rematch can't
+                    # include us as a ghost player.
+                    leave_finished(code, my_name)
+                    go_home()
                     st.rerun()
                 st.markdown("</div>", unsafe_allow_html=True)
 
@@ -2112,12 +2296,20 @@ elif st.session_state.screen == "game":
         st.stop()
 
     # ── ACTIVE GAME ────────────────────────────────────────────────────────────
+    st.session_state.celebrated = False
+
     cp         = state["players"][state["current_player_idx"]]
     is_my_turn = cp["name"] == my_name or same_device
 
     if same_device:
+        if is_fr:
+            banner = f"🎮 Au tour de {esc(cp['name'])}"
+        elif is_es:
+            banner = f"🎮 Turno de {esc(cp['name'])}"
+        else:
+            banner = f"🎮 {esc(cp['name'])}'s turn"
         st.markdown(
-            f"<div class='wb-active-player-banner'>🎮 {esc(cp['name'])}'s turn</div>",
+            f"<div class='wb-active-player-banner'>{banner}</div>",
             unsafe_allow_html=True,
         )
 
@@ -2134,83 +2326,123 @@ elif st.session_state.screen == "game":
 
     combo = state["current_combo"]
 
-    if is_fr:
-        turn_label = "Votre tour — saisissez un mot contenant"
-    elif is_es:
-        turn_label = "Tu turno &mdash; escribe una palabra que contenga"
-    else:
-        turn_label = "Your turn &mdash; type a word containing"
-
-    st.markdown(
-        f"<div class='wb-turn-label'>{turn_label} "
-        f"<span style='font-size:1.1rem;letter-spacing:0.12em;color:#e8a020;'>{combo}</span></div>",
-        unsafe_allow_html=True,
-    )
-
-    if st.session_state.last_error:
-        st.markdown(f"<div class='wb-msg wb-msg-bad'>{esc(st.session_state.last_error)}</div>",
-                    unsafe_allow_html=True)
-
-    if is_fr:
-        placeholder  = f"{combo} · saisissez votre mot ici…"
-        submit_label = "Valider →"
-    elif is_es:
-        placeholder  = f"{combo} · escribe tu palabra aquí…"
-        submit_label = "Enviar →"
-    else:
-        placeholder  = f"{combo} · type your word here…"
-        submit_label = "Submit →"
-
-    with st.form(key=f"wf_{st.session_state.form_key}", clear_on_submit=True):
-        word      = st.text_input("word", label_visibility="collapsed", placeholder=placeholder)
-        submitted = st.form_submit_button(submit_label)
-
-    if submitted and word.strip():
-        submit_name = cp["name"] if same_device else my_name
-        state, result = submit_word(st.session_state.room_code, state, submit_name, word.strip())
-        if result == "ok":
-            st.session_state.form_key  += 1
-            st.session_state.last_error = ""
+    if is_my_turn:
+        # ── It's this player's turn: show the prompt + form ──────────────────
+        if is_fr:
+            turn_label = "Votre tour — saisissez un mot contenant"
+        elif is_es:
+            turn_label = "Tu turno &mdash; escribe una palabra que contenga"
         else:
-            st.session_state.last_error = result
-        st.rerun()
+            turn_label = "Your turn &mdash; type a word containing"
 
-    st.components.v1.html("""
-    <script>
-    function focusInput() {
-        const doc = window.parent.document;
-        const inputs = doc.querySelectorAll('input[type="text"]');
-        if (inputs.length > 0) {
-            const inp = inputs[inputs.length - 1];
-            inp.focus();
-            const val = inp.value;
-            inp.value = '';
-            inp.value = val;
+        st.markdown(
+            f"<div class='wb-turn-label'>{turn_label} "
+            f"<span style='font-size:1.1rem;letter-spacing:0.12em;color:#e8a020;'>{combo}</span></div>",
+            unsafe_allow_html=True,
+        )
+
+        if st.session_state.last_error:
+            st.markdown(f"<div class='wb-msg wb-msg-bad'>{esc(st.session_state.last_error)}</div>",
+                        unsafe_allow_html=True)
+
+        if is_fr:
+            placeholder  = f"{combo} · saisissez votre mot ici…"
+            submit_label = "Valider →"
+        elif is_es:
+            placeholder  = f"{combo} · escribe tu palabra aquí…"
+            submit_label = "Enviar →"
+        else:
+            placeholder  = f"{combo} · type your word here…"
+            submit_label = "Submit →"
+
+        with st.form(key=f"wf_{st.session_state.form_key}", clear_on_submit=True):
+            word      = st.text_input("word", label_visibility="collapsed", placeholder=placeholder)
+            submitted = st.form_submit_button(submit_label)
+
+        if submitted and word.strip():
+            submit_name = cp["name"] if same_device else my_name
+            state, result = submit_word(st.session_state.room_code, state, submit_name, word.strip())
+            if result == "ok":
+                st.session_state.form_key  += 1
+                st.session_state.last_error = ""
+            else:
+                st.session_state.last_error = result
+            st.rerun()
+
+        # Aggressive refocus only makes sense while a form exists.
+        st.components.v1.html("""
+        <script>
+        function focusInput() {
+            const doc = window.parent.document;
+            const inputs = doc.querySelectorAll('input[type="text"]');
+            if (inputs.length > 0) {
+                const inp = inputs[inputs.length - 1];
+                inp.focus();
+                const val = inp.value;
+                inp.value = '';
+                inp.value = val;
+            }
         }
-    }
 
-    focusInput();
-    setTimeout(focusInput, 100);
-    setTimeout(focusInput, 300);
-    setTimeout(focusInput, 600);
-    setTimeout(focusInput, 1000);
+        focusInput();
+        setTimeout(focusInput, 100);
+        setTimeout(focusInput, 300);
+        setTimeout(focusInput, 600);
+        setTimeout(focusInput, 1000);
 
-    window.parent.document.addEventListener('click', function(e) {
-        const tag = e.target.tagName;
-        if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'BUTTON') {
-            setTimeout(focusInput, 50);
-        }
-    });
+        window.parent.document.addEventListener('click', function(e) {
+            const tag = e.target.tagName;
+            if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'BUTTON') {
+                setTimeout(focusInput, 50);
+            }
+        });
 
-    window.parent.document.addEventListener('keydown', function(e) {
-        const active = window.parent.document.activeElement;
-        const isTyping = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA');
-        if (!isTyping) {
-            if (e.key === 'c') { e.stopPropagation(); }
-            focusInput();
-        }
-    }, true);
-    </script>
-    """, height=0)
+        window.parent.document.addEventListener('keydown', function(e) {
+            const active = window.parent.document.activeElement;
+            const isTyping = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA');
+            if (!isTyping) {
+                if (e.key === 'c') { e.stopPropagation(); }
+                focusInput();
+            }
+        }, true);
+        </script>
+        """, height=0)
+    else:
+        # ── Someone else's turn: waiting state (the lost else-branch) ─────────
+        st.session_state.last_error = ""
+        if is_fr:
+            waiting_txt = f"Au tour de {esc(cp['name'])} — combinaison"
+        elif is_es:
+            waiting_txt = f"Turno de {esc(cp['name'])} — combinación"
+        else:
+            waiting_txt = f"Waiting for {esc(cp['name'])} — combo"
+        st.markdown(
+            f"<div class='wb-waiting-label'>{waiting_txt} "
+            f"<span style='font-family:DM Mono,monospace;color:#e8a020;letter-spacing:0.12em;'>{combo}</span></div>",
+            unsafe_allow_html=True,
+        )
+
+    # ── Leave game (mid-game) ─────────────────────────────────────────────────
+    me = next((p for p in state["players"] if p["name"] == my_name), None)
+    st.markdown("<div class='btn-ghost'>", unsafe_allow_html=True)
+    if same_device:
+        end_label = "Terminer la partie" if is_fr else ("Terminar la partida" if is_es else "End game")
+        if st.button(end_label, key="leave_game_btn"):
+            delete_room(st.session_state.room_code)
+            go_home()
+            st.rerun()
+    elif me is not None and me["alive"]:
+        leave_label = "Quitter la partie" if is_fr else ("Abandonar la partida" if is_es else "Leave game")
+        if st.button(leave_label, key="leave_game_btn"):
+            leave_game(st.session_state.room_code, my_name)
+            go_home()
+            st.rerun()
+    else:
+        # Eliminated spectators can also go home cleanly.
+        home_label = "Accueil" if is_fr else ("Inicio" if is_es else "Back to home")
+        if st.button(home_label, key="leave_game_btn"):
+            go_home()
+            st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
 
     st_autorefresh(interval=1000, key="game_refresh")
